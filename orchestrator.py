@@ -56,11 +56,22 @@ _BULLISH_RE = re.compile(r"\b(bullish|long|upside|buy)\b", re.IGNORECASE)
 
 # Common words to exclude from ticker detection
 _SKIP_WORDS = {
+    # Common English words
     "I", "A", "AN", "THE", "IN", "ON", "AT", "TO", "OF", "OR", "AND", "BUT",
     "FOR", "IF", "IS", "IT", "BE", "DO", "GO", "MY", "NO", "SO", "UP", "US",
-    "BY", "ME", "HE", "WE", "YO", "AM", "AS", "RE", "OK", "PM", "AM", "EU",
-    "AI", "ML", "TV", "UK", "US", "VC", "IPO", "CEO", "CFO", "CTO", "PE",
-    "EPS", "RSI", "ETF", "SEC", "FED", "GDP", "CPI", "IMF", "USD", "EUR",
+    "BY", "ME", "HE", "WE", "YO", "AM", "AS", "RE", "OK", "PM", "EU",
+    # Geo / org abbreviations
+    "AI", "ML", "TV", "UK", "VC", "IPO", "CEO", "CFO", "CTO",
+    # Financial metrics (already present)
+    "PE", "EPS", "RSI", "ETF", "SEC", "FED", "GDP", "CPI", "IMF", "USD", "EUR",
+    # Options-specific words that are NOT tickers
+    "CALL", "CALLS", "PUT", "PUTS", "OPTION", "OPTIONS",
+    "BULL", "BEAR", "BULLISH", "BEARISH", "NEUTRAL",
+    "SPREAD", "HEDGE", "HEDGING", "STRADDLE", "STRANGLE",
+    "OTM", "ITM", "ATM", "DTE", "IV", "IVR", "POP", "ROC", "PNL",
+    "LONG", "SHORT", "BUY", "SELL",
+    # Analysis terms
+    "MA", "EMA", "SMA", "MACD", "ATR", "BB", "VWAP",
 }
 
 

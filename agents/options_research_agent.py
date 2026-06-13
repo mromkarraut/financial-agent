@@ -56,10 +56,14 @@ def _utcnow() -> str:
 # ── Chain helpers ─────────────────────────────────────────────────────────────
 
 def _mid(row: dict) -> float:
-    b, a = row.get("bid") or 0.0, row.get("ask") or 0.0
+    b    = row.get("bid") or 0.0
+    a    = row.get("ask") or 0.0
+    last = row.get("lastPrice") or 0.0
     if b > 0 and a > 0:
         return round((b + a) / 2.0, 2)
-    return round(row.get("lastPrice") or 0.0, 2)
+    if a > 0:
+        return round(a, 2)   # use ask alone when market maker quotes ask but no bid
+    return round(last, 2)
 
 
 def _atm(strikes: list[float], price: float) -> float:
