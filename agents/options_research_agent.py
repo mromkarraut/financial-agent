@@ -355,6 +355,9 @@ def _fmt_detail_card(s: dict, price: float) -> str:
 
         f"<b>Key Numbers</b>\n"
         f"<code>"
+        f"SELL  {opt_word} ${s['sell_strike']:.0f}   @ ${s['sell_price']:.2f}/share\n"
+        f"BUY   {opt_word} ${s['buy_strike']:.0f}   @ ${s['buy_price']:.2f}/share\n"
+        f"{'─' * 34}\n"
         f"{net_label:<12} {net_sign}{per_share}  ({per_cont}/contract)\n"
         f"Break-even   ${s['breakeven']}\n"
         f"\n"

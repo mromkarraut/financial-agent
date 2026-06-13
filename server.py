@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import config
 from agents.options_research_agent import OptionsResearchAgent
 from agents.ui_researcher_agent import UIResearcherAgent
+from agents.ui_testing_agent import UITestingAgent
 from db.database import init_db
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,16 @@ async def mark_implemented(finding_id: int) -> HTMLResponse:
     await _ui_agent.mark_implemented(finding_id)
     report = await _ui_agent.html_report()
     return HTMLResponse(report)
+
+
+@app.get("/test", response_class=HTMLResponse)
+async def run_tests() -> HTMLResponse:
+    agent  = UITestingAgent(base_url="http://localhost:8000")
+    report = await agent.run_all()
+    history = await _get_history()
+    return HTMLResponse(_page(history, active_tab="test", body_override=
+        f'<div class="result-wrap" style="max-width:700px">{report}</div>'
+    ))
 
 
 # ── HTML page ─────────────────────────────────────────────────────────────────
@@ -522,6 +533,7 @@ def _page(history: list[dict], active_tab: str = "search",
     <nav class="nav-links">
       <a href="/"            class="nav-link {'active' if active_tab=='search'   else ''}">Search</a>
       <a href="/ui-research" class="nav-link {'active' if active_tab=='research' else ''}">UI Research</a>
+      <a href="/test"        class="nav-link {'active' if active_tab=='test'     else ''}">Run Tests</a>
     </nav>
     <div class="theme-btns">
       <button class="theme-btn" id="t-default"  onclick="setTheme('')"         title="Default dark">🌙</button>

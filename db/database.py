@@ -72,6 +72,15 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_orm_chat_ticker
                 ON options_research_memory(chat_id, ticker);
 
+            CREATE TABLE IF NOT EXISTS ui_test_results (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT    NOT NULL,
+                test_name   TEXT    NOT NULL,
+                passed      INTEGER NOT NULL,
+                detail      TEXT    DEFAULT '',
+                duration_ms INTEGER DEFAULT 0
+            );
+
             CREATE TABLE IF NOT EXISTS ui_research_memory (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 topic          TEXT    NOT NULL,
