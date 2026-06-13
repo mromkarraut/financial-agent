@@ -1,0 +1,13 @@
+openai>=1.30.0
+python-telegram-bot>=20.7
+yfinance>=0.2.40
+aiosqlite>=0.20.0
+pandas>=2.2.0
+numpy>=1.26.0
+polygon-api-client>=1.14.0
+python-dotenv>=1.0.0
+aiohttp>=3.10.0
+# TA-Lib requires the system C library before installing this package:
+#   macOS:  brew install ta-lib
+#   Ubuntu: sudo apt-get install libta-lib-dev
+# TA-Lib>=0.4.32
