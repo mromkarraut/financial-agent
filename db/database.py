@@ -57,8 +57,28 @@ async def init_db() -> None:
                 summary      TEXT    NOT NULL DEFAULT '',
                 updated_at   TEXT    NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS options_research_memory (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id      TEXT    NOT NULL,
+                ticker       TEXT    NOT NULL,
+                timestamp    TEXT    NOT NULL,
+                price        REAL,
+                outlook      TEXT,
+                ivr          REAL,
+                recommended  TEXT,
+                strategies   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_orm_chat_ticker
+                ON options_research_memory(chat_id, ticker);
         """)
         await db.commit()
+        # Non-destructive migrations
+        try:
+            await db.execute("ALTER TABLE options_research_memory ADD COLUMN output_html TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass  # column already exists
 
 
 async def log_message(

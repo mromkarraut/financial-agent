@@ -63,14 +63,32 @@ class StockResearchAgent(BaseAgent):
                 f"Stance: {stance} — ___."
             )
 
-            response = await self._client.chat.completions.create(
-                model=config.LLM_MODEL,
-                max_tokens=config.LLM_MAX_TOKENS,
-                messages=[
-                    {"role": "user", "content": f"{self._SYSTEM}\n\n{prompt}"},
-                ],
-            )
-            snapshot = (response.choices[0].message.content or "").strip()
+            try:
+                response = await self._client.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    max_tokens=config.LLM_MAX_TOKENS,
+                    messages=[{"role": "user", "content": f"{self._SYSTEM}\n\n{prompt}"}],
+                )
+                raw = (response.choices[0].message.content or "").strip()
+                # Reject garbage output (model outputting ?s or near-empty)
+                q_ratio = raw.count("?") / max(len(raw), 1)
+                snapshot = raw if raw and q_ratio < 0.3 else None
+            except Exception:
+                snapshot = None
+
+            if not snapshot:
+                trend_word  = "uptrend" if vs_ma20 == vs_ma50 == "above" else \
+                              "downtrend" if vs_ma20 == vs_ma50 == "below" else "consolidation"
+                mom_word    = "range-bound" if rsi_lbl == "neutral" else rsi_lbl
+                stance_note = ("price holds above key averages" if stance == "Bullish" else
+                               "price is below key support levels" if stance == "Bearish" else
+                               "price sits between key averages with no clear breakout")
+                snapshot = (
+                    f"Trend: {ticker} at ${price} is {vs_ma20} MA20 and {vs_ma50} MA50, "
+                    f"indicating {trend_word}.\n"
+                    f"Momentum: RSI {rsi} is {rsi_lbl}, so near-term price action looks {mom_word}.\n"
+                    f"Stance: {stance} — {stance_note}."
+                )
 
             header = (
                 f"<b>{data.get('company_name', ticker)} ({ticker})</b>\n"

@@ -80,12 +80,28 @@ class FundamentalsAgent(BaseAgent):
                 f"Risk: One key risk for {name} is ___."
             )
 
-            response = await self._client.chat.completions.create(
-                model=config.LLM_MODEL,
-                max_tokens=config.LLM_MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            analysis = (response.choices[0].message.content or "").strip()
+            try:
+                response = await self._client.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    max_tokens=config.LLM_MAX_TOKENS,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = (response.choices[0].message.content or "").strip()
+                q_ratio = raw.count("?") / max(len(raw), 1)
+                analysis = raw if raw and q_ratio < 0.3 else None
+            except Exception:
+                analysis = None
+
+            if not analysis:
+                val_note = (f"PE {pe} vs fwd PE {fwd_pe} — {val_signal} relative to sector peers"
+                            if val_signal != "N/A" else f"PE {pe}, forward PE {fwd_pe}")
+                rev_note = (f"{rev_yoy}% YoY, {rev_trend} quarterly trend, {margin_signal} margins ({margin}%)"
+                            if rev_yoy != "N/A" else f"margins at {margin}%")
+                analysis = (
+                    f"Valuation: {val_note}.\n"
+                    f"Revenue: {rev_note}.\n"
+                    f"Risk: Macro uncertainty and sector competition remain key watch items."
+                )
 
             # Build quarterly revenue table
             rev_table = ""

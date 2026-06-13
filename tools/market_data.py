@@ -198,6 +198,80 @@ def _fetch_options_context_sync(ticker: str) -> dict:
     }
 
 
+def _fetch_options_chain_sync(ticker: str) -> dict:
+    import math as _math
+    stock = yf.Ticker(ticker)
+    info = stock.info or {}
+
+    current_price = _safe(
+        info.get("regularMarketPrice")
+        or info.get("currentPrice")
+        or info.get("previousClose")
+    )
+
+    expirations: list[str] = []
+    try:
+        expirations = list(stock.options) if stock.options else []
+    except Exception:
+        pass
+
+    def _rows(df: "pd.DataFrame") -> list[dict]:
+        if df is None or df.empty:
+            return []
+        want = [c for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"] if c in df.columns]
+        rows = []
+        for _, row in df[want].iterrows():
+            r: dict = {}
+            for k in want:
+                r[k] = _safe(row[k], 4) if k == "impliedVolatility" else _safe(row[k])
+            rows.append(r)
+        return rows
+
+    chains: list[dict] = []
+    for exp in expirations[:4]:
+        try:
+            opt = stock.option_chain(exp)
+            calls_df = opt.calls.copy()
+            puts_df = opt.puts.copy()
+            if current_price:
+                lo, hi = current_price * 0.85, current_price * 1.15
+                calls_df = calls_df[(calls_df["strike"] >= lo) & (calls_df["strike"] <= hi)]
+                puts_df = puts_df[(puts_df["strike"] >= lo) & (puts_df["strike"] <= hi)]
+            chains.append({
+                "expiration": exp,
+                "calls": _rows(calls_df),
+                "puts": _rows(puts_df),
+            })
+        except Exception as exc:
+            logger.debug("Chain fetch failed %s@%s: %s", ticker, exp, exc)
+
+    # 52-week rolling 30d HV for IVR computation
+    hv_series: list[float] = []
+    hv_30d: float | None = None
+    try:
+        hist = stock.history(period="1y")
+        close = hist["Close"].dropna()
+        if len(close) >= 30:
+            log_ret = close.pct_change().dropna()
+            roll_hv = log_ret.rolling(30).std() * _math.sqrt(252)
+            hv_series = [float(v) for v in roll_hv.dropna().tolist()]
+            hv_30d = _safe(float(roll_hv.iloc[-1])) if not roll_hv.empty else None
+    except Exception:
+        pass
+
+    return {
+        "ticker": ticker.upper(),
+        "current_price": current_price,
+        "company_name": info.get("longName") or ticker,
+        "available_expirations": expirations,
+        "chains": chains,
+        "implied_volatility": _safe(info.get("impliedVolatility")),
+        "beta": _safe(info.get("beta")),
+        "hv_30d": hv_30d,
+        "hv_series": hv_series,
+    }
+
+
 # ── Polygon real-time quote (optional) ────────────────────────────────────────
 
 async def _polygon_quote(ticker: str) -> dict | None:
@@ -262,4 +336,13 @@ async def get_options_data(ticker: str) -> dict:
         return await asyncio.to_thread(_fetch_options_context_sync, ticker)
     except Exception as exc:
         logger.error("get_options_data(%s) failed: %s", ticker, exc)
+        return {"error": str(exc)}
+
+
+async def get_options_chain(ticker: str) -> dict:
+    """Returns current price, expirations, and options chain (calls+puts) for first 4 expirations."""
+    try:
+        return await asyncio.to_thread(_fetch_options_chain_sync, ticker)
+    except Exception as exc:
+        logger.error("get_options_chain(%s) failed: %s", ticker, exc)
         return {"error": str(exc)}

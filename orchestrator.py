@@ -26,6 +26,7 @@ import config
 from agents.base_agent import AgentResult
 from agents.fundamentals_agent import FundamentalsAgent
 from agents.options_agent import OptionsAgent
+from agents.options_research_agent import OptionsResearchAgent
 from agents.stock_research import StockResearchAgent
 from agents.summarizer import SummarizerAgent
 from agents.watchlist_agent import WatchlistAgent
@@ -70,11 +71,12 @@ class Orchestrator:
             api_key="lm-studio",
         )
         self._agents: dict[str, Any] = {
-            "stock_research": StockResearchAgent(),
-            "fundamentals":   FundamentalsAgent(),
-            "options":        OptionsAgent(),
-            "summarizer":     SummarizerAgent(),
-            "watchlist":      WatchlistAgent(),
+            "stock_research":    StockResearchAgent(),
+            "fundamentals":      FundamentalsAgent(),
+            "options":           OptionsAgent(),
+            "options_research":  OptionsResearchAgent(),
+            "summarizer":        SummarizerAgent(),
+            "watchlist":         WatchlistAgent(),
         }
         self.memory = MemoryManager(self._client)
 
@@ -111,7 +113,7 @@ class Orchestrator:
                     )
 
             history = await self.memory.get_context(chat_id)
-            reply = await self._route_with_llm(working_text, history)
+            reply = await self._route_with_llm(working_text, history, chat_id=chat_id)
             await self.memory.save_turn(chat_id, text, reply)
             return reply
 
@@ -142,8 +144,8 @@ class Orchestrator:
 
     # ── Regex-based routing ───────────────────────────────────────────────────
 
-    async def _route_with_llm(self, text: str, history: list[dict]) -> str:
-        calls = self._build_calls(text)
+    async def _route_with_llm(self, text: str, history: list[dict], chat_id: str | int = "") -> str:
+        calls = self._build_calls(text, chat_id=chat_id)
         if not calls:
             return await self._general_reply(text, history)
 
@@ -167,36 +169,47 @@ class Orchestrator:
         return "\n\n".join(parts)
 
     async def _general_reply(self, text: str, history: list[dict]) -> str:
-        messages = history + [{"role": "user", "content": f"{_GENERAL_SYSTEM}\n\n{text}"}]
-        response = await self._client.chat.completions.create(
-            model=config.LLM_MODEL,
-            max_tokens=config.LLM_MAX_TOKENS,
-            messages=messages,
-        )
-        return (response.choices[0].message.content or "I'm not sure how to answer that.").strip()
+        user_msg = {"role": "user", "content": f"{_GENERAL_SYSTEM}\n\n{text}"}
+        for messages in [history + [user_msg], [user_msg]]:
+            try:
+                response = await self._client.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    max_tokens=config.LLM_MAX_TOKENS,
+                    messages=messages,
+                )
+                return (response.choices[0].message.content or "I'm not sure how to answer that.").strip()
+            except Exception as exc:
+                if messages is not history + [user_msg]:
+                    raise
+                logger.warning("_general_reply failed with history (corrupt?), retrying without: %s", exc)
+        return "I'm not sure how to answer that."
 
-    def _build_calls(self, text: str) -> list[dict]:
+    def _build_calls(self, text: str, chat_id: str | int = "") -> list[dict]:
         calls: list[dict] = []
         tickers = self._extract_tickers(text)
         wants_options = bool(_OPTIONS_RE.search(text))
 
         for ticker in tickers:
-            calls.append({"tool": "run_stock_research", "args": {"ticker": ticker}})
-            calls.append({"tool": "run_fundamentals", "args": {"ticker": ticker}})
             if wants_options:
+                # Options research is self-contained — skip stock/fundamentals to keep output clean
                 outlook = (
                     "bearish" if _BEARISH_RE.search(text)
                     else "bullish" if _BULLISH_RE.search(text)
                     else "neutral"
                 )
-                calls.append({"tool": "run_options_analysis", "args": {"ticker": ticker, "outlook": outlook, "dte": 30}})
+                calls.append({"tool": "run_options_research", "args": {
+                    "ticker": ticker, "outlook": outlook, "chat_id": str(chat_id),
+                }})
+            else:
+                calls.append({"tool": "run_stock_research", "args": {"ticker": ticker}})
+                calls.append({"tool": "run_fundamentals", "args": {"ticker": ticker}})
 
         return calls
 
     def _extract_tickers(self, text: str) -> list[str]:
         seen: set[str] = set()
         tickers: list[str] = []
-        for m in _TICKER_RE.finditer(text):
+        for m in _TICKER_RE.finditer(text.upper()):
             ticker = (m.group(1) or m.group(2)).upper()
             if ticker not in _SKIP_WORDS and ticker not in seen:
                 seen.add(ticker)
@@ -207,11 +220,12 @@ class Orchestrator:
 
     async def _dispatch(self, tool_name: str, tool_input: dict) -> AgentResult:
         mapping = {
-            "run_stock_research":   ("stock_research", tool_input),
-            "run_fundamentals":     ("fundamentals",   tool_input),
-            "run_options_analysis": ("options",        tool_input),
-            "run_summarizer":       ("summarizer",     tool_input),
-            "run_watchlist":        ("watchlist",      tool_input),
+            "run_stock_research":   ("stock_research",   tool_input),
+            "run_fundamentals":     ("fundamentals",     tool_input),
+            "run_options_analysis": ("options",          tool_input),
+            "run_options_research": ("options_research", tool_input),
+            "run_summarizer":       ("summarizer",       tool_input),
+            "run_watchlist":        ("watchlist",        tool_input),
         }
         entry = mapping.get(tool_name)
         if entry is None:
