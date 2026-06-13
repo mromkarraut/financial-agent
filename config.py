@@ -27,3 +27,7 @@ DB_PATH: str = os.environ.get("DB_PATH", "db/state.db")
 # ── Behaviour ─────────────────────────────────────────────────────────────────
 # Messages longer than this go through the summarizer before routing.
 LONG_MESSAGE_THRESHOLD: int = int(os.environ.get("LONG_MESSAGE_THRESHOLD", "300"))
+
+# ── Web UI ─────────────────────────────────────────────────────────────────────
+# URL of the FastAPI web server, sent as a link in Telegram replies.
+WEB_SERVER_URL: str = os.environ.get("WEB_SERVER_URL", "http://localhost:8000")

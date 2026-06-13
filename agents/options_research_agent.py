@@ -575,6 +575,11 @@ class OptionsResearchAgent(BaseAgent):
                     parts.append("\n" + note)
 
             parts.append("\n<i>Educational only — not financial advice.</i>")
+            if config.WEB_SERVER_URL:
+                parts.append(
+                    f'🌐 <a href="{config.WEB_SERVER_URL}">'
+                    f"View full dashboard</a>"
+                )
 
             output = "\n".join(parts)
 
