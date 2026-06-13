@@ -397,6 +397,72 @@ body.amber .result-wrap pre {
   padding-left: 3px; margin-left: -3px;
 }
 
+/* ── Mobile responsive ── */
+.hamburger {
+  display: none;
+  background: none; border: none; color: var(--text);
+  font-size: 20px; cursor: pointer; padding: 4px 6px; line-height: 1;
+  flex-shrink: 0;
+}
+.sidebar-backdrop {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55); z-index: 50;
+}
+
+@media (max-width: 660px) {
+  .hamburger { display: flex; align-items: center; }
+
+  /* Sidebar becomes a slide-in drawer */
+  aside {
+    position: fixed; left: -240px; top: 0; height: 100%; width: 240px;
+    z-index: 100; transition: left .25s cubic-bezier(.4,0,.2,1);
+    box-shadow: 4px 0 24px rgba(0,0,0,.45);
+  }
+  aside.open { left: 0; }
+  .sidebar-backdrop.open { display: block; }
+
+  /* Header: tighter */
+  header { padding: 8px 12px; gap: 6px; }
+  header h1 { font-size: 14px; }
+  .badge { display: none; }
+  .nav-links { gap: 2px; }
+  .nav-link { font-size: 11px; padding: 3px 6px; }
+  .theme-btns { gap: 2px; margin-left: 2px; }
+  .theme-btn { font-size: 12px; padding: 2px 5px; }
+
+  /* Search bar: wrap into two rows */
+  .search-bar { padding: 8px 12px; }
+  .search-bar form { flex-wrap: wrap; gap: 6px; width: 100%; }
+  .search-bar input  { flex: 1 1 80px; min-width: 0; }
+  .search-bar select { flex: 1 1 100px; min-width: 0; }
+  .btn { flex: 0 0 auto; }
+
+  /* Results: less padding, full width */
+  #results { padding: 12px; }
+  .result-wrap { max-width: 100%; }
+
+  /* Pre blocks: smaller font, horizontal scroll intact */
+  .result-wrap pre {
+    font-size: 11.5px;
+    line-height: 1.42;
+    padding: 10px 12px;
+  }
+
+  /* Code blocks: allow horizontal scroll instead of wrapping */
+  .result-wrap code {
+    display: block;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 12px;
+    padding: 10px 12px;
+  }
+
+  /* Placeholder: less top margin */
+  .placeholder { margin-top: 40px; }
+  .placeholder .icon { font-size: 28px; }
+  .placeholder h2 { font-size: 16px; }
+}
+
 /* ── UI Research page ── */
 .research-report h2 {
   font-size: 18px; margin-bottom: 6px;
@@ -447,7 +513,10 @@ def _page(history: list[dict], active_tab: str = "search",
   <style>{_CSS}</style>
 </head>
 <body>
+  <div class="sidebar-backdrop" id="backdrop" onclick="closeSidebar()"></div>
+
   <header>
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="History">☰</button>
     <h1>📊 Financial Research</h1>
     <span class="badge">Options</span>
     <nav class="nav-links">
@@ -462,7 +531,7 @@ def _page(history: list[dict], active_tab: str = "search",
   </header>
 
   <div class="main">
-    <aside>
+    <aside id="sidebar">
       <div class="sidebar-hdr">Recent Searches</div>
       <div id="history-list">{sidebar}</div>
     </aside>
@@ -494,6 +563,20 @@ def _page(history: list[dict], active_tab: str = "search",
   </div>
 
   <script>
+    // ── Sidebar drawer (mobile) ───────────────────────────────────────────────
+    function toggleSidebar() {{
+      document.getElementById('sidebar').classList.toggle('open');
+      document.getElementById('backdrop').classList.toggle('open');
+    }}
+    function closeSidebar() {{
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('backdrop').classList.remove('open');
+    }}
+    // Close sidebar after picking a history item on mobile
+    document.body.addEventListener('htmx:afterRequest', e => {{
+      if (e.detail.elt.classList.contains('h-item')) closeSidebar();
+    }});
+
     // ── Theme toggle ─────────────────────────────────────────────────────────
     function setTheme(t) {{
       ['phosphor','amber'].forEach(x => document.body.classList.remove(x));
