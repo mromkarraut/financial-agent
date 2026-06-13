@@ -13,6 +13,9 @@ from those chats are processed; all others are silently ignored.
 import asyncio
 import logging
 import os
+import re
+import shutil
+import subprocess
 import sys
 
 from telegram import Message, Update
@@ -113,6 +116,34 @@ async def _periodic_compression(orchestrator: Orchestrator) -> None:
             logger.error("Periodic compression failed: %s", exc)
 
 
+def _start_cloudflare_tunnel() -> str | None:
+    """Start a cloudflared quick tunnel and return the public URL, or None."""
+    cloudflared = shutil.which("cloudflared") or os.path.expanduser("~/.local/bin/cloudflared")
+    if not os.path.exists(cloudflared):
+        logger.warning("cloudflared not found — skipping tunnel")
+        return None
+    try:
+        proc = subprocess.Popen(
+            [cloudflared, "tunnel", "--url", "http://localhost:8000", "--no-autoupdate"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        # cloudflared prints the URL to stderr/stdout; poll until we see it
+        url_re = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+        for line in proc.stdout:  # type: ignore[union-attr]
+            m = url_re.search(line)
+            if m:
+                url = m.group(0)
+                logger.info("Cloudflare tunnel active: %s", url)
+                return url
+            if proc.poll() is not None:
+                break
+    except Exception as exc:
+        logger.warning("Could not start cloudflared: %s", exc)
+    return None
+
+
 async def _on_startup(application: Application) -> None:  # type: ignore[type-arg]
     global _orchestrator, _sender, _ALLOWED_CHAT_IDS
     logger.info("Initialising database…")
@@ -121,10 +152,17 @@ async def _on_startup(application: Application) -> None:  # type: ignore[type-ar
     _sender = TelegramSender(application.bot)
     _ALLOWED_CHAT_IDS = _build_allowed_set()
     asyncio.create_task(_periodic_compression(_orchestrator))
-    logger.info(
-        "Bot ready. Allowed chats: %s",
-        _ALLOWED_CHAT_IDS or "all",
-    )
+
+    # Start Cloudflare tunnel and update WEB_SERVER_URL so the link in
+    # Telegram replies always points to the live public URL.
+    tunnel_url = await asyncio.to_thread(_start_cloudflare_tunnel)
+    if tunnel_url:
+        config.WEB_SERVER_URL = tunnel_url
+        logger.info("WEB_SERVER_URL set to %s", tunnel_url)
+    else:
+        logger.info("WEB_SERVER_URL: %s (no tunnel)", config.WEB_SERVER_URL)
+
+    logger.info("Bot ready. Allowed chats: %s", _ALLOWED_CHAT_IDS or "all")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
