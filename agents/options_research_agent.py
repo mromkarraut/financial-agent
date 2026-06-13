@@ -345,9 +345,8 @@ def _fmt_detail_card(s: dict, price: float) -> str:
     theta_str = f"{'+' if s['pos_theta'] >= 0 else ''}${s['pos_theta']:.2f}"
 
     return (
-        f"<b>The Legs</b>\n"
-        f"  {sell_leg}\n"
-        f"  {buy_leg} <i>(protection)</i>\n\n"
+        f"<b>The Legs :</b>  {sell_leg}\n"
+        f"             {buy_leg} <i>(protection)</i>\n\n"
 
         f"<b>How it works</b>\n"
         f"  {n1}\n"
