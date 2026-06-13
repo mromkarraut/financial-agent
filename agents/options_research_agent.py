@@ -310,12 +310,56 @@ def _fmt_comparison(strategies: list[dict], best_num: str) -> str:
 
 
 def _fmt_detail_card(s: dict, price: float) -> str:
+    is_call   = "call" in s["kind"]
+    opt_word  = "Call" if is_call else "Put"
     net_label = "Net credit" if s["is_credit"] else "Net debit "
     net_sign  = "+" if s["is_credit"] else "-"
+    dte_word  = f"{s['dte']} day{'s' if s['dte'] != 1 else ''}"
+    per_share = f"${abs(s['net']):.2f}"
+    per_cont  = f"${abs(int(s['net'] * 100))}"
+
+    # Plain-English leg labels
+    sell_leg = f"Sell a {opt_word} at ${s['sell_strike']:.0f}"
+    buy_leg  = f"Buy a {opt_word} at ${s['buy_strike']:.0f}"
+
+    # Full narrative explanation per strategy type
+    if s["kind"] == "bear_call":
+        narrative = (
+            f"You sell a Call at ${s['sell_strike']:.0f} and buy a Call at ${s['buy_strike']:.0f} "
+            f"as protection, collecting {per_share} per share ({per_cont} per contract) upfront. "
+            f"You keep the full premium if the stock stays <b>below ${s['sell_strike']:.0f}</b> at expiration. "
+            f"Losses begin above ${s['sell_strike']:.0f} and are capped at ${s['max_loss']} "
+            f"if the stock closes above ${s['buy_strike']:.0f}."
+        )
+    elif s["kind"] == "bull_put":
+        narrative = (
+            f"You sell a Put at ${s['sell_strike']:.0f} and buy a Put at ${s['buy_strike']:.0f} "
+            f"as protection, collecting {per_share} per share ({per_cont} per contract) upfront. "
+            f"You keep the full premium if the stock stays <b>above ${s['sell_strike']:.0f}</b> at expiration. "
+            f"Losses begin below ${s['sell_strike']:.0f} and are capped at ${s['max_loss']} "
+            f"if the stock closes below ${s['buy_strike']:.0f}."
+        )
+    elif s["kind"] == "bear_put":
+        narrative = (
+            f"You buy a Put at ${s['buy_strike']:.0f} giving you the right to sell at that price, "
+            f"and sell a Put at ${s['sell_strike']:.0f} to offset the cost. "
+            f"Net cost is {per_share} per share ({per_cont} per contract). "
+            f"The trade profits if the stock falls <b>below ${s['breakeven']}</b> at expiration. "
+            f"Maximum gain of ${s['max_profit']} is achieved if the stock closes below ${s['sell_strike']:.0f}."
+        )
+    else:  # bull_call
+        narrative = (
+            f"You buy a Call at ${s['buy_strike']:.0f} giving you the right to buy at that price, "
+            f"and sell a Call at ${s['sell_strike']:.0f} to offset the cost. "
+            f"Net cost is {per_share} per share ({per_cont} per contract). "
+            f"The trade profits if the stock rises <b>above ${s['breakeven']}</b> at expiration. "
+            f"Maximum gain of ${s['max_profit']} is achieved if the stock closes above ${s['sell_strike']:.0f}."
+        )
+
     return (
-        f"<b>Sell ${s['sell_strike']:.0f}{'C' if 'call' in s['kind'] else 'P'}"
-        f"  ·  Buy ${s['buy_strike']:.0f}{'C' if 'call' in s['kind'] else 'P'}"
-        f"  ·  {_fmt_exp(s['exp'])} ({s['dte']}d)</b>\n"
+        f"<b>{sell_leg}  ·  {buy_leg}</b>\n"
+        f"<b>Expiring {_fmt_exp(s['exp'])} ({dte_word})</b>\n\n"
+        f"{narrative}\n\n"
         f"<code>"
         f"{net_label}  {net_sign}${abs(s['net']):.2f}  (${abs(int(s['net']*100))}/contract)\n"
         f"POP         {s['pop']*100:.0f}%"
@@ -504,10 +548,16 @@ class OptionsResearchAgent(BaseAgent):
 
             # Recommendation + detail card
             if best:
+                pop_pct  = f"{best['pop']*100:.0f}%"
+                net_desc = (f"collecting ${best['max_profit']} credit"
+                            if best["is_credit"] else f"paying ${best['max_loss']} debit")
+                risk_desc = (f"${best['max_loss']} at risk"
+                             if best["is_credit"] else f"${best['max_profit']} potential gain")
                 parts.append(
-                    f"\n🏆 <b>Recommended: {best['num']} {best['name']} "
-                    f"{_fmt_exp(best['exp'])} ({best['dte']}d)</b>\n"
-                    f"Highest score (POP × ROC) for <b>{outlook}</b> outlook."
+                    f"\n🏆 <b>Recommended: {best['num']} {best['name']} — {_fmt_exp(best['exp'])}</b>\n"
+                    f"{pop_pct} probability of profit, {net_desc}, {risk_desc}. "
+                    f"Best risk-adjusted return for a <b>{outlook}</b> outlook "
+                    f"(score: POP {pop_pct} × ROC {best['roc']:.0f}%)."
                 )
                 parts.append("\n" + _fmt_detail_card(best, price))
                 parts.append(f"<pre>{_pnl_chart(best)}</pre>")
