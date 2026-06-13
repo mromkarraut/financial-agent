@@ -344,6 +344,59 @@ aside {
 .result-wrap pre::-webkit-scrollbar { height: 3px; }
 .result-wrap pre::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
+/* ── Theme variants (Financial Dark Theme Palette finding) ── */
+body.phosphor {
+  --bg:      #000;     --bg2:     #050f05;  --bg3:     #0a1a0a;
+  --border:  #0d2a0d; --text:    #00ff41;  --dim:     #00802a;
+  --green:   #00ff41; --red:     #ff4444;  --yellow:  #ffd700;
+  --code-fg: #00ff41; --blue:    #00cc88;  --blue-lt: #00ffaa;
+}
+body.phosphor .result-wrap pre {
+  background: #000; color: #00e63a;
+  text-shadow: 0 0 7px rgba(0,255,65,0.28);
+  border-color: #0d2a0d;
+}
+body.amber {
+  --bg:      #0a0800; --bg2:     #110e00;  --bg3:     #1a1600;
+  --border:  #2a2000; --text:    #ffb000;  --dim:     #80600a;
+  --green:   #90ee90; --red:     #ff6060;  --yellow:  #ffd700;
+  --code-fg: #ffc844; --blue:    #60aaff;  --blue-lt: #88ccff;
+}
+body.amber .result-wrap pre {
+  background: #080600; color: #ffa500;
+  text-shadow: 0 0 5px rgba(255,176,0,0.22);
+  border-color: #2a2000;
+}
+
+/* Theme toggle buttons */
+.theme-btns { display: flex; gap: 3px; margin-left: 6px; }
+.theme-btn {
+  background: none; border: 1px solid var(--border);
+  border-radius: 4px; font-size: 13px; padding: 2px 7px;
+  cursor: pointer; color: var(--dim); transition: all .12s; line-height: 1.4;
+}
+.theme-btn:hover        { border-color: var(--text); color: var(--text); }
+.theme-btn.active       { border-color: var(--blue); background: var(--bg3); color: var(--text); }
+
+/* ── Output colorization (injected by enhanceOutput()) ── */
+.pos      { color: var(--green)  !important; font-weight: 600; }
+.neg      { color: var(--red)    !important; font-weight: 600; }
+.pct      { color: var(--yellow) !important; }
+
+/* Highlighted rows inside <pre> blocks */
+.star-row {
+  display: block; width: 100%;
+  background: rgba(210,153,34,0.13);
+  border-left: 3px solid var(--yellow);
+  padding-left: 3px; margin-left: -3px;
+}
+.atm-row {
+  display: block; width: 100%;
+  background: rgba(31,111,235,0.13);
+  border-left: 3px solid var(--blue);
+  padding-left: 3px; margin-left: -3px;
+}
+
 /* ── UI Research page ── */
 .research-report h2 {
   font-size: 18px; margin-bottom: 6px;
@@ -401,6 +454,11 @@ def _page(history: list[dict], active_tab: str = "search",
       <a href="/"            class="nav-link {'active' if active_tab=='search'   else ''}">Search</a>
       <a href="/ui-research" class="nav-link {'active' if active_tab=='research' else ''}">UI Research</a>
     </nav>
+    <div class="theme-btns">
+      <button class="theme-btn" id="t-default"  onclick="setTheme('')"         title="Default dark">🌙</button>
+      <button class="theme-btn" id="t-phosphor" onclick="setTheme('phosphor')" title="Phosphor green">💚</button>
+      <button class="theme-btn" id="t-amber"    onclick="setTheme('amber')"    title="Amber terminal">🟡</button>
+    </div>
   </header>
 
   <div class="main">
@@ -436,17 +494,54 @@ def _page(history: list[dict], active_tab: str = "search",
   </div>
 
   <script>
-    // Track active sidebar item — 3 lines, no Alpine needed
+    // ── Theme toggle ─────────────────────────────────────────────────────────
+    function setTheme(t) {{
+      ['phosphor','amber'].forEach(x => document.body.classList.remove(x));
+      if (t) document.body.classList.add(t);
+      localStorage.setItem('theme', t);
+      document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('t-' + (t || 'default')).classList.add('active');
+    }}
+    setTheme(localStorage.getItem('theme') || '');
+
+    // ── Active sidebar item ───────────────────────────────────────────────────
     function setActive(id) {{
       document.querySelectorAll('.h-item')
         .forEach(el => el.classList.toggle('active', +el.dataset.id === id));
     }}
-
-    // Clear active state when a new search is submitted
     document.body.addEventListener('htmx:beforeRequest', e => {{
       if (e.detail.elt.tagName === 'FORM')
         document.querySelectorAll('.h-item').forEach(el => el.classList.remove('active'));
     }});
+
+    // ── Output colorization ───────────────────────────────────────────────────
+    function enhanceOutput() {{
+      // Colorize <pre> blocks: highlight rows, colour +/- dollar amounts
+      document.querySelectorAll('.result-wrap pre').forEach(pre => {{
+        pre.innerHTML = pre.innerHTML
+          .split('\\n')
+          .map(line => {{
+            if (line.includes('⭐'))    return `<span class="star-row">${{line}}</span>`;
+            if (line.includes('◀ATM')) return `<span class="atm-row">${{line}}</span>`;
+            return line;
+          }})
+          .join('\\n')
+          .replace(/(\\+\\$[\\d,.]+)/g, '<span class="pos">$1</span>')
+          .replace(/(-\\$[\\d,.]+)/g,  '<span class="neg">$1</span>');
+      }});
+
+      // Colorize metrics <code> block (contains POP / P50 / Max profit)
+      document.querySelectorAll('.result-wrap code').forEach(code => {{
+        if (!code.textContent.includes('POP')) return;
+        code.innerHTML = code.innerHTML
+          .replace(/(\\+\\$[\\d,.]+)/g, '<span class="pos">$1</span>')
+          .replace(/(-\\$[\\d,.]+)/g,  '<span class="neg">$1</span>')
+          .replace(/\\b(\\d{{1,3}}%)/g, '<span class="pct">$1</span>');
+      }});
+    }}
+
+    document.body.addEventListener('htmx:afterSwap', enhanceOutput);
+    document.addEventListener('DOMContentLoaded', enhanceOutput);
   </script>
 </body>
 </html>"""

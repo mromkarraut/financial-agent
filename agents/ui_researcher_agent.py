@@ -144,7 +144,7 @@ async def _seed_if_empty() -> None:
                     "INSERT INTO ui_research_memory "
                     "(topic, timestamp, summary, recommendation, score, implemented, source) "
                     "VALUES (?,?,?,?,?,?,?)",
-                    (_utcnow(), item["topic"], item["summary"],
+                    (item["topic"], _utcnow(), item["summary"],
                      item["recommendation"], item["score"],
                      item["implemented"], item["source"]),
                 )
@@ -184,7 +184,7 @@ class UIResearcherAgent:
                 "INSERT INTO ui_research_memory "
                 "(topic, timestamp, summary, recommendation, score, implemented, source) "
                 "VALUES (?,?,?,?,?,0,?)",
-                (topic, _utcnow(), summary, recommendation, score, source),
+                (topic, _utcnow(), summary, recommendation, score, source),  # correct order
             )
             await db.commit()
             return cur.lastrowid
