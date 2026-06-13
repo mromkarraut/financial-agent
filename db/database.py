@@ -71,6 +71,17 @@ async def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_orm_chat_ticker
                 ON options_research_memory(chat_id, ticker);
+
+            CREATE TABLE IF NOT EXISTS ui_research_memory (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic          TEXT    NOT NULL,
+                timestamp      TEXT    NOT NULL,
+                summary        TEXT    NOT NULL,
+                recommendation TEXT    NOT NULL,
+                score          INTEGER DEFAULT 0,
+                implemented    INTEGER DEFAULT 0,
+                source         TEXT    DEFAULT ''
+            );
         """)
         await db.commit()
         # Non-destructive migrations
