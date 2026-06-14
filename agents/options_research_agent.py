@@ -146,7 +146,22 @@ def _make_strategy(
     }
 
 
+def _is_vertical(buy_strike: float, sell_strike: float, buy_row: dict,
+                  sell_row: dict, exp: str) -> bool:
+    """Guard: both legs must be same type, same expiration, different strikes."""
+    return (
+        buy_strike != sell_strike
+        and bool(buy_row) and bool(sell_row)
+        and _mid(buy_row) > 0 and _mid(sell_row) > 0
+    )
+
+
 def _generate_strategies(outlook: str, chains: list[dict], price: float) -> list[dict]:
+    """
+    Generate vertical spread candidates only.
+    A vertical spread: same expiration, same option type (all calls or all puts),
+    two different strikes — one bought, one sold.
+    """
     candidates: list[dict] = []
 
     for chain in chains[:3]:
@@ -160,60 +175,68 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float) -> list
         if not calls_l or not puts_l:
             continue
 
-        all_s = _chain_strikes(calls_l, puts_l)
-        atm = _atm(all_s, price)
-
+        all_s   = _chain_strikes(calls_l, puts_l)
+        atm     = _atm(all_s, price)
         calls_m = {r["strike"]: r for r in calls_l}
         puts_m  = {r["strike"]: r for r in puts_l}
 
-        atm_c  = calls_m.get(atm)
-        atm_p  = puts_m.get(atm)
-
-        # Nearest strikes above and below ATM
         s_above = [s for s in all_s if s > atm]
         s_below = [s for s in all_s if s < atm]
-        otm1_c = s_above[0] if s_above else None
-        otm2_c = s_above[1] if len(s_above) > 1 else None
-        otm1_p = s_below[-1] if s_below else None
-        otm2_p = s_below[-2] if len(s_below) > 1 else None
 
-        # ATM IV as representative sigma for this expiration
-        sigma = (atm_c or {}).get("impliedVolatility") or (atm_p or {}).get("impliedVolatility") or 0.30
+        def _sigma(row: dict) -> float:
+            """Use the option's own IV for accurate per-leg Greeks."""
+            iv = (row or {}).get("impliedVolatility") or 0.0
+            return iv if iv > 0.01 else 0.30
 
-        def _add(name, kind, b_s, s_s, b_row, s_row):
-            if not b_row or not s_row:
+        def _add_vertical(name: str, kind: str,
+                          b_strike: float, s_strike: float,
+                          b_row: dict, s_row: dict) -> None:
+            # Enforce vertical spread: same exp (guaranteed by chain loop),
+            # same type (enforced by kind), different strikes, valid prices.
+            if not _is_vertical(b_strike, s_strike, b_row, s_row, exp):
                 return
-            bp, sp = _mid(b_row), _mid(s_row)
-            if bp <= 0 or sp <= 0:
-                return
+            # Use average IV of the two legs for Greeks (more accurate than ATM-only)
+            leg_sigma = (_sigma(b_row) + _sigma(s_row)) / 2
             s = _make_strategy(
                 num="", name=name, kind=kind,
-                buy_strike=b_s, sell_strike=s_s,
-                buy_price=bp, sell_price=sp,
-                S=price, T=T, sigma=sigma,
+                buy_strike=b_strike, sell_strike=s_strike,
+                buy_price=_mid(b_row), sell_price=_mid(s_row),
+                S=price, T=T, sigma=leg_sigma,
                 exp=exp, dte=dte,
             )
             if s:
                 candidates.append(s)
 
         if outlook in ("bullish", "neutral"):
-            if atm_c and otm1_c:
-                _add("Bull Call Spread", "bull_call", atm, otm1_c, atm_c, calls_m.get(otm1_c))
-            if atm_p and otm1_p:
-                _add("Bull Put Spread",  "bull_put",  otm1_p, atm, puts_m.get(otm1_p), atm_p)
-            if atm_c and otm2_c:
-                _add("Bull Call (Wide)", "bull_call", atm, otm2_c, atm_c, calls_m.get(otm2_c))
+            # Vertical call debit spreads (buy lower call, sell higher call)
+            for i, otm in enumerate(s_above[:2]):
+                width = "Narrow" if i == 0 else "Wide"
+                _add_vertical(f"Bull Call Spread ({width})", "bull_call",
+                              atm, otm, calls_m.get(atm, {}), calls_m.get(otm, {}))
+            # Vertical put credit spreads (sell higher put, buy lower put)
+            for i, otm in enumerate(s_below[-2:][::-1]):
+                width = "Narrow" if i == 0 else "Wide"
+                _add_vertical(f"Bull Put Spread ({width})", "bull_put",
+                              otm, atm, puts_m.get(otm, {}), puts_m.get(atm, {}))
 
         elif outlook == "bearish":
-            if atm_c and otm1_c:
-                _add("Bear Call Spread", "bear_call", otm1_c, atm, calls_m.get(otm1_c), atm_c)
-            if atm_p and otm1_p:
-                _add("Bear Put Spread",  "bear_put",  atm, otm1_p, atm_p, puts_m.get(otm1_p))
-            if atm_c and otm2_c:
-                _add("Bear Call (Wide)", "bear_call", otm2_c, atm, calls_m.get(otm2_c), atm_c)
+            # Vertical call credit spreads (sell lower call, buy higher call)
+            for i, otm in enumerate(s_above[:2]):
+                width = "Narrow" if i == 0 else "Wide"
+                _add_vertical(f"Bear Call Spread ({width})", "bear_call",
+                              otm, atm, calls_m.get(otm, {}), calls_m.get(atm, {}))
+            # Vertical put debit spreads (buy higher put, sell lower put)
+            for i, otm in enumerate(s_below[-2:][::-1]):
+                width = "Narrow" if i == 0 else "Wide"
+                _add_vertical(f"Bear Put Spread ({width})", "bear_put",
+                              atm, otm, puts_m.get(atm, {}), puts_m.get(otm, {}))
 
-    # Rank: credit strategies first, then by score (POP × ROC)
-    candidates.sort(key=lambda s: (-int(s["is_credit"]), -s["score"]))
+    # Rank each type by POP (tastytrade primary metric), then blend:
+    # show best 3 credit verticals + best 2 debit verticals (or fill from either
+    # side if one type is unavailable).
+    credits = sorted([c for c in candidates if     c["is_credit"]], key=lambda s: -s["pop"])
+    debits  = sorted([c for c in candidates if not c["is_credit"]], key=lambda s: -s["pop"])
+    candidates = (credits[:3] + debits[:2]) or (credits[:5]) or (debits[:5])
     top5 = candidates[:5]
     for i, s in enumerate(top5):
         s["num"] = NUMS[i]
