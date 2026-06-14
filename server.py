@@ -13,6 +13,7 @@ Run:  uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 Open: http://localhost:8000
 """
 
+import asyncio
 import logging
 
 import aiosqlite
@@ -21,14 +22,16 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import config
+from agents.ibkr_agent import IBKRAgent
 from agents.options_research_agent import OptionsResearchAgent
 from agents.ui_researcher_agent import UIResearcherAgent
 from agents.ui_testing_agent import UITestingAgent
 from db.database import init_db
 
 logger = logging.getLogger(__name__)
-app    = FastAPI(title="Financial Research Agent")
+app       = FastAPI(title="Financial Research Agent")
 _ui_agent = UIResearcherAgent()
+_ibkr     = IBKRAgent()
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -37,6 +40,8 @@ _ui_agent = UIResearcherAgent()
 async def startup() -> None:
     await init_db()
     await _ui_agent.ensure_seeded()
+    # Start IBKR tickle loop in background (no-op if gateway not running)
+    asyncio.create_task(_ibkr.tickle_loop())
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -151,6 +156,44 @@ async def mark_implemented(finding_id: int) -> HTMLResponse:
     await _ui_agent.mark_implemented(finding_id)
     report = await _ui_agent.html_report()
     return HTMLResponse(report)
+
+
+@app.get("/ibkr", response_class=HTMLResponse)
+async def ibkr_page() -> HTMLResponse:
+    history = await _get_history()
+    status  = await _ibkr.status()
+    orders  = await _ibkr.orders_summary()
+    body    = (f'<div class="result-wrap" style="max-width:760px">'
+               f'{status}<br><br>{orders}</div>')
+    return HTMLResponse(_page(history, active_tab="ibkr", body_override=body))
+
+
+@app.post("/ibkr/execute", response_class=HTMLResponse)
+async def ibkr_execute(
+    ticker:       str   = Form(...),
+    short_strike: float = Form(...),
+    long_strike:  float = Form(...),
+    right:        str   = Form("P"),
+    expiry:       str   = Form(...),
+    net_price:    float = Form(...),
+    quantity:     int   = Form(1),
+    tif:          str   = Form("DAY"),
+) -> HTMLResponse:
+    result = await _ibkr.execute_spread(
+        ticker=ticker.upper(), short_strike=short_strike,
+        long_strike=long_strike, right=right, expiry=expiry,
+        net_price=net_price, quantity=quantity, tif=tif,
+    )
+    orders = await _ibkr.orders_summary()
+    return HTMLResponse(
+        f'<div class="result-wrap" style="max-width:760px">{result}<br><br>{orders}</div>'
+    )
+
+
+@app.get("/ibkr/positions", response_class=HTMLResponse)
+async def ibkr_positions() -> HTMLResponse:
+    html = await _ibkr.positions_summary()
+    return HTMLResponse(f'<div class="result-wrap">{html}</div>')
 
 
 @app.get("/test", response_class=HTMLResponse)
@@ -532,8 +575,9 @@ def _page(history: list[dict], active_tab: str = "search",
     <span class="badge">Options</span>
     <nav class="nav-links">
       <a href="/"            class="nav-link {'active' if active_tab=='search'   else ''}">Search</a>
+      <a href="/ibkr"        class="nav-link {'active' if active_tab=='ibkr'     else ''}">IBKR</a>
       <a href="/ui-research" class="nav-link {'active' if active_tab=='research' else ''}">UI Research</a>
-      <a href="/test"        class="nav-link {'active' if active_tab=='test'     else ''}">Run Tests</a>
+      <a href="/test"        class="nav-link {'active' if active_tab=='test'     else ''}">Tests</a>
     </nav>
     <div class="theme-btns">
       <button class="theme-btn" id="t-default"  onclick="setTheme('')"         title="Default dark">🌙</button>

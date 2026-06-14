@@ -72,6 +72,35 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_orm_chat_ticker
                 ON options_research_memory(chat_id, ticker);
 
+            CREATE TABLE IF NOT EXISTS ibkr_conid_cache (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol     TEXT    NOT NULL,
+                sectype    TEXT    NOT NULL,
+                expiry     TEXT    NOT NULL,
+                right      TEXT    NOT NULL,
+                strike     REAL    NOT NULL,
+                conid      INTEGER NOT NULL,
+                cached_at  TEXT    NOT NULL,
+                UNIQUE(symbol, sectype, expiry, right, strike)
+            );
+
+            CREATE TABLE IF NOT EXISTS ibkr_orders (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp     TEXT    NOT NULL,
+                account_id    TEXT    NOT NULL,
+                ticker        TEXT    NOT NULL,
+                strategy      TEXT    NOT NULL,
+                short_strike  REAL,
+                long_strike   REAL,
+                option_type   TEXT,
+                expiry        TEXT,
+                net_price     REAL,
+                quantity      INTEGER DEFAULT 1,
+                ibkr_order_id TEXT,
+                status        TEXT    DEFAULT 'pending',
+                raw_response  TEXT    DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS ui_test_results (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp   TEXT    NOT NULL,
