@@ -58,6 +58,30 @@
       "args": ["-m", "mcp_servers.registry", "--serve"],
       "cwd": "/home/omkar/repos/financial-agent",
       "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "ibkr-session": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.ibkr_session.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "ibkr-positions": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.ibkr_positions.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "ibkr-orders": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.ibkr_orders.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "ibkr-market-data": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.ibkr_market_data.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
     }
   }
 }

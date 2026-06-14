@@ -501,6 +501,126 @@ REGISTRY: dict[str, AgentEntry] = {
             },
         ],
     },
+
+    "ibkr_session": {
+        "slug": "ibkr_session",
+        "name": "IBKR Session Agent",
+        "description": (
+            "CP Gateway session lifecycle: auth status, 55s tickle keepalive (auto-started), "
+            "reauthentication, account listing, and account summary. "
+            "Start gateway: cd ibkr_gateway && ./bin/run.sh root/conf.yaml"
+        ),
+        "version": "1.0.0",
+        "capabilities": ["session_management", "auth_check", "tickle_keepalive", "account_listing"],
+        "llm": _LLM,
+        "memory": {"type": "sqlite", "path": "db/agents/ibkr_session.db"},
+        "shared_data": [],
+        "transport": "stdio",
+        "command": ["python", "-m", "mcp_servers.ibkr_session.server"],
+        "tools": [
+            {"name": "get_auth_status",      "description": "Check gateway auth + connection state.", "parameters": {}},
+            {"name": "reauthenticate_session","description": "Re-open brokerage session without browser.", "parameters": {}},
+            {"name": "list_accounts",        "description": "List all linked account IDs.", "parameters": {}},
+            {"name": "get_account_details",  "description": "Net liq, cash, buying power for an account.",
+             "parameters": {"account_id": {"type": "string", "description": "Account ID (empty = first)"}}},
+            {"name": "get_session_log",      "description": "Recent session events from memory.",
+             "parameters": {"limit": {"type": "integer", "description": "Number of entries"}}},
+        ],
+    },
+
+    "ibkr_positions": {
+        "slug": "ibkr_positions",
+        "name": "IBKR Positions Agent",
+        "description": (
+            "Live portfolio positions, P&L, and account allocation from CP Gateway. "
+            "Generates LLM portfolio narrative. Also provides asset-class allocation breakdown."
+        ),
+        "version": "1.0.0",
+        "capabilities": ["live_positions", "pnl", "portfolio_summary", "allocation", "llm_narrative"],
+        "llm": _LLM,
+        "memory": {"type": "sqlite", "path": "db/agents/ibkr_positions.db"},
+        "shared_data": [],
+        "transport": "stdio",
+        "command": ["python", "-m", "mcp_servers.ibkr_positions.server"],
+        "tools": [
+            {"name": "get_open_positions",  "description": "All open positions with P&L.",
+             "parameters": {"account_id": {"type": "string", "description": "Account ID (empty = first)"}}},
+            {"name": "get_live_pnl",        "description": "Day P&L and unrealized P&L across accounts.", "parameters": {}},
+            {"name": "get_portfolio_summary","description": "P&L + positions in one combined view.", "parameters": {}},
+            {"name": "get_allocation",       "description": "Allocation by asset class / sector.",
+             "parameters": {"account_id": {"type": "string", "description": "Account ID (empty = first)"}}},
+        ],
+    },
+
+    "ibkr_orders": {
+        "slug": "ibkr_orders",
+        "name": "IBKR Orders Agent",
+        "description": (
+            "Place, confirm, cancel, and review vertical spread orders via CP Gateway. "
+            "Includes LLM pre-trade risk briefing and persisted order history."
+        ),
+        "version": "1.0.0",
+        "capabilities": ["order_execution", "order_cancellation", "order_history", "llm_risk_briefing", "two_step_confirmation"],
+        "llm": _LLM,
+        "memory": {"type": "sqlite", "path": "db/agents/ibkr_orders.db"},
+        "shared_data": ["db/state.db (ibkr_orders)", "db/state.db (ibkr_conid_cache)"],
+        "transport": "stdio",
+        "command": ["python", "-m", "mcp_servers.ibkr_orders.server"],
+        "tools": [
+            {"name": "place_spread",       "description": "Submit a vertical spread order.", "parameters": {
+                "ticker": {"type": "string"}, "short_strike": {"type": "number"},
+                "long_strike": {"type": "number"}, "right": {"type": "string"},
+                "expiry": {"type": "string"}, "net_price": {"type": "number"},
+                "quantity": {"type": "integer"}, "tif": {"type": "string"},
+            }},
+            {"name": "get_risk_briefing",  "description": "LLM pre-trade risk briefing — no order placed.", "parameters": {
+                "ticker": {"type": "string"}, "short_strike": {"type": "number"},
+                "long_strike": {"type": "number"}, "right": {"type": "string"},
+                "expiry": {"type": "string"}, "net_price": {"type": "number"},
+                "quantity": {"type": "integer"},
+            }},
+            {"name": "confirm_order",      "description": "Send IBKR two-step confirmation reply.",
+             "parameters": {"reply_id": {"type": "string", "description": "Reply ID from initial order response"}}},
+            {"name": "cancel_open_order",  "description": "Cancel a pending order by order ID.",
+             "parameters": {"order_id": {"type": "string"}}},
+            {"name": "get_live_orders",    "description": "Orders currently live on exchange.", "parameters": {}},
+            {"name": "get_order_history",  "description": "Recent orders from local DB.",
+             "parameters": {"limit": {"type": "integer"}}},
+        ],
+    },
+
+    "ibkr_market_data": {
+        "slug": "ibkr_market_data",
+        "name": "IBKR Market Data Agent",
+        "description": (
+            "Contract lookup (conid), live market snapshots (bid/ask/last/Greeks), "
+            "option strike discovery, and contract search via CP Gateway. "
+            "Conid results cached in SQLite."
+        ),
+        "version": "1.0.0",
+        "capabilities": ["conid_lookup", "live_quotes", "option_greeks", "strike_discovery", "contract_search", "conid_cache"],
+        "llm": _LLM,
+        "memory": {"type": "sqlite", "path": "db/agents/ibkr_market_data.db"},
+        "shared_data": ["db/state.db (ibkr_conid_cache)"],
+        "transport": "stdio",
+        "command": ["python", "-m", "mcp_servers.ibkr_market_data.server"],
+        "tools": [
+            {"name": "get_stock_conid",           "description": "Look up conid for a stock/ETF.",
+             "parameters": {"symbol": {"type": "string"}}},
+            {"name": "get_option_contract_conid", "description": "Look up option conid (cached).",
+             "parameters": {"symbol": {"type": "string"}, "expiry": {"type": "string"},
+                            "right": {"type": "string"}, "strike": {"type": "number"},
+                            "exchange": {"type": "string"}}},
+            {"name": "get_market_snapshot",       "description": "Live bid/ask/last/Greeks for comma-separated conids.",
+             "parameters": {"conids": {"type": "string"}}},
+            {"name": "get_option_strikes",        "description": "Available strikes for symbol+month.",
+             "parameters": {"symbol": {"type": "string"}, "month": {"type": "string"}}},
+            {"name": "search_contract",           "description": "Search any contract by name or ticker.",
+             "parameters": {"query": {"type": "string"}, "sec_type": {"type": "string"}}},
+            {"name": "clear_conid_cache",         "description": "Remove cached conids for a symbol.",
+             "parameters": {"symbol": {"type": "string"}}},
+        ],
+    },
 }
 
 
