@@ -162,48 +162,31 @@ def start_gateway(paper: bool = True) -> bool:
         ok(f"Gateway already running on https://localhost:5000")
         return True
 
-    # Java check
-    if not os.path.exists(JAVA):
-        warn(f"Java not found at {JAVA}")
-        warn("Install Java or set IBKR_JAVA_BIN in .env")
-        warn("Gateway skipped — start it manually: cd ibkr_gateway && ./bin/run.sh root/conf.paper.yaml")
-        return False
-
     if not os.path.isdir(GW_DIR):
         warn(f"ibkr_gateway/ not found — run start.py from the project root")
         return False
 
-    conf = "root/conf.paper.yaml" if paper else "root/conf.yaml"
-    conf_path = os.path.join(GW_DIR, conf)
-    if not os.path.exists(conf_path):
-        warn(f"Config not found: {conf_path}")
+    bat = os.path.join(GW_DIR, "start_gateway.bat")
+    if not os.path.exists(bat):
+        warn(f"start_gateway.bat not found in {GW_DIR}")
         return False
 
-    # Build the java command directly (mirrors run.sh logic)
-    runtime_jar = os.path.join(GW_DIR, "dist", "ibgroup.web.core.iblink.router.clientportal.gw.jar")
-    runtime_lib = os.path.join(GW_DIR, "build", "lib", "runtime", "*")
-    classpath   = f"{os.path.join(GW_DIR, 'root')}:{runtime_jar}:{runtime_lib}"
+    # The gateway lives on the C: drive so cmd.exe can use normal Windows paths.
+    # C:\ibkr_gateway is a copy of ibkr_gateway/ — update it when files change.
+    WIN_GW = r"C:\ibkr_gateway"
+    bat    = f"{WIN_GW}\\start_gateway.bat"
+    if not os.path.exists("/mnt/c/ibkr_gateway/start_gateway.bat"):
+        warn("C:\\ibkr_gateway not found — copying gateway files...")
+        subprocess.run(["cp", "-r", GW_DIR, "/mnt/c/ibkr_gateway"], check=True)
+        ok("Gateway copied to C:\\ibkr_gateway")
 
-    cmd = [
-        JAVA,
-        "-server",
-        "-Dvertx.disableDnsResolver=true",
-        "-Djava.net.preferIPv4Stack=true",
-        f"-Dvertx.logger-delegate-factory-class-name=io.vertx.core.logging.SLF4JLogDelegateFactory",
-        "-Dnologback.statusListenerClass=ch.qos.logback.core.status.OnConsoleStatusListener",
-        "-Dnolog4j.debug=true",
-        "-Dnolog4j2.debug=true",
-        "-cp", classpath,
-        "ibgroup.web.core.clientportal.gw.GatewayStart",
-        "--conf", f"../{conf}",
-    ]
+    cmd = ["cmd.exe", "/c", f'cd /d "{WIN_GW}" && start_gateway.bat']
 
-    _launch(
-        f"IBKR gateway ({'paper' if paper else 'LIVE'})",
-        cmd,
-        cwd=GW_DIR,
-        log_file=os.path.join(LOG_DIR, "gateway.log"),
-    )
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_fh = open(os.path.join(LOG_DIR, "gateway.log"), "a")
+    p = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh, cwd="/mnt/c/Windows")
+    _procs.append((f"IBKR gateway ({'paper' if paper else 'LIVE'})", p))
+    ok(f"IBKR gateway ({'paper' if paper else 'LIVE'})  {DIM}(logs → logs/gateway.log){RST}")
 
     # Wait for TCP port to open (gateway takes ~10-15s to start)
     print(f"  {DIM}Waiting for gateway to start", end="", flush=True)
