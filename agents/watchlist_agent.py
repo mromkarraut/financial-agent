@@ -73,7 +73,7 @@ class WatchlistAgent(BaseAgent):
 
     async def _check(self) -> AgentResult:
         # Lazy import to avoid circular dependency at module load time
-        from agents.stock_research import StockResearchAgent
+        from agents.stock_research_agent import StockResearchAgent
 
         tickers = await watchlist_get_all()
         if not tickers:

@@ -211,340 +211,368 @@ async def run_tests() -> HTMLResponse:
 _CSS = """
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── Design tokens ── */
 :root {
-  --bg:       #0d1117;
-  --bg2:      #161b22;
-  --bg3:      #21262d;
-  --border:   #30363d;
-  --text:     #e6edf3;
-  --dim:      #8b949e;
-  --blue:     #1f6feb;
-  --blue-lt:  #388bfd;
-  --green:    #3fb950;
-  --red:      #f85149;
-  --yellow:   #d29922;
-  --code-fg:  #79c0ff;
+  /* Dark theme (Robinhood-inspired) */
+  --bg:       #000000;
+  --bg2:      #111111;
+  --bg3:      #1c1c1c;
+  --border:   #2e2e2e;
+  --text:     #ffffff;
+  --dim:      #8a8a8a;
+  --green:    #00c805;
+  --red:      #ff5000;
+  --yellow:   #f5c518;
+  --blue:     #387dff;
+  --blue-lt:  #5a99ff;
+  --code-fg:  #7ec8e3;
   --mono:     ui-monospace, 'Cascadia Mono', 'Cascadia Code',
               'JetBrains Mono', 'Fira Code', Consolas,
               'Liberation Mono', monospace;
+  --radius:   10px;
+  --ease:     0.16s ease;
+}
+
+/* ── Light theme ── */
+body.light {
+  --bg:       #ffffff;
+  --bg2:      #f7f7f7;
+  --bg3:      #efefef;
+  --border:   #e2e2e2;
+  --text:     #0a0a0a;
+  --dim:      #6b6b6b;
+  --green:    #008a03;
+  --red:      #e03000;
+  --yellow:   #b87800;
+  --blue:     #0050d0;
+  --blue-lt:  #0066ee;
+  --code-fg:  #0055aa;
 }
 
 body {
-  background: var(--bg); color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* ── Header ── */
 header {
-  background: var(--bg2); border-bottom: 1px solid var(--border);
-  padding: 10px 18px; display: flex; align-items: center; gap: 10px;
-  flex-shrink: 0; z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  z-index: 10;
 }
-header h1 { font-size: 16px; font-weight: 600; }
-.badge {
-  background: var(--blue); color: #fff;
-  font-size: 11px; padding: 1px 7px; border-radius: 10px;
+
+.logo {
+  display: flex; align-items: center; gap: 9px;
+  text-decoration: none; color: var(--text); flex-shrink: 0;
 }
-.nav-links { margin-left: auto; display: flex; gap: 4px; }
+.logo-mark {
+  width: 30px; height: 30px;
+  background: var(--green);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 800; color: #000; line-height: 1;
+  flex-shrink: 0;
+}
+.logo-text { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+
+.nav-links { margin-left: auto; display: flex; gap: 2px; }
 .nav-link {
-  color: var(--dim); font-size: 13px; text-decoration: none;
-  padding: 4px 10px; border-radius: 5px; transition: background .12s;
+  color: var(--dim); font-size: 13px; font-weight: 500;
+  text-decoration: none; padding: 5px 12px;
+  border-radius: 8px; transition: background var(--ease), color var(--ease);
 }
 .nav-link:hover { background: var(--bg3); color: var(--text); }
-.nav-link.active { background: var(--bg3); color: var(--text); }
+.nav-link.active { color: var(--text); font-weight: 600; }
 
-/* ── Layout ── */
-.main { display: flex; flex: 1; overflow: hidden; }
+/* ── Theme toggle — pill ── */
+.theme-toggle {
+  display: flex; background: var(--bg3);
+  border-radius: 20px; padding: 3px; gap: 1px; margin-left: 10px; flex-shrink: 0;
+}
+.theme-btn {
+  background: none; border: none; border-radius: 18px;
+  padding: 4px 11px; font-size: 13px; cursor: pointer;
+  color: var(--dim); transition: all var(--ease); line-height: 1;
+}
+.theme-btn.active {
+  background: var(--bg); color: var(--text);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+
+/* Hamburger — mobile only */
+.hamburger {
+  display: none; background: none; border: none;
+  color: var(--text); font-size: 22px; cursor: pointer;
+  padding: 4px; flex-shrink: 0; line-height: 1;
+}
+
+/* ── App layout ── */
+.app-layout { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
 /* ── Sidebar ── */
 aside {
-  width: 220px; min-width: 220px;
-  background: var(--bg2); border-right: 1px solid var(--border);
+  width: 230px; min-width: 230px;
+  background: var(--bg); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; overflow: hidden;
 }
 .sidebar-hdr {
-  padding: 9px 13px; font-size: 11px; font-weight: 600;
-  color: var(--dim); text-transform: uppercase; letter-spacing: .06em;
-  border-bottom: 1px solid var(--border); flex-shrink: 0;
+  padding: 14px 16px 10px;
+  font-size: 10px; font-weight: 700;
+  color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em;
 }
-#history-list {
-  flex: 1; overflow-y: auto; padding: 5px;
-}
+#history-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
 #history-list::-webkit-scrollbar { width: 3px; }
 #history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 .h-item {
-  padding: 8px 10px; border-radius: 6px; cursor: pointer;
-  transition: background .1s; margin-bottom: 2px;
-  border: 1px solid transparent;
+  padding: 10px 10px; border-radius: 8px; cursor: pointer;
+  transition: background var(--ease); margin-bottom: 2px;
 }
 .h-item:hover  { background: var(--bg3); }
-.h-item.active { background: #1a2a40; border-color: var(--blue); }
-.h-ticker { font-weight: 600; font-size: 13px; }
-.h-meta   { font-size: 11px; color: var(--dim); margin-top: 2px; line-height: 1.4; }
-.h-rec    { font-size: 10px; opacity: .75; }
-.no-history { padding: 14px; color: var(--dim); font-size: 13px; }
+.h-item.active { background: var(--bg3); }
+.h-ticker {
+  font-weight: 700; font-size: 14px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.h-meta { font-size: 11px; color: var(--dim); margin-top: 3px; line-height: 1.4; }
+.h-rec  { font-size: 10px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.no-history { padding: 20px 16px; color: var(--dim); font-size: 13px; }
 .bull { color: var(--green); }
 .bear { color: var(--red); }
 .neu  { color: var(--yellow); }
 
-/* ── Content ── */
+/* ── Content area ── */
 .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
 /* ── Search bar ── */
 .search-bar {
-  background: var(--bg2); border-bottom: 1px solid var(--border);
-  padding: 10px 18px; display: flex; align-items: center; gap: 8px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.search-bar input, .search-bar select {
-  background: var(--bg); border: 1px solid var(--border);
-  border-radius: 6px; color: var(--text); font-size: 14px;
-  padding: 6px 10px; outline: none;
+.search-form {
+  display: flex; align-items: center; gap: 10px; max-width: 640px;
 }
-.search-bar input {
-  width: 105px; text-transform: uppercase;
-  letter-spacing: .04em; font-weight: 600;
+.ticker-wrap { position: relative; flex: 0 0 140px; }
+.ticker-wrap::before {
+  content: '$'; position: absolute; left: 11px; top: 50%;
+  transform: translateY(-50%); color: var(--dim);
+  font-weight: 700; font-size: 15px; pointer-events: none;
 }
-.search-bar input::placeholder { text-transform: none; font-weight: 400; color: var(--dim); }
-.search-bar input:focus, .search-bar select:focus { border-color: var(--blue); }
-.search-bar select { cursor: pointer; }
-.btn {
-  background: var(--blue); border: none; border-radius: 6px;
-  color: #fff; font-size: 14px; font-weight: 500; padding: 6px 16px;
-  cursor: pointer; transition: background .12s;
+.search-bar input[type="text"] {
+  width: 100%; background: var(--bg2);
+  border: 1.5px solid var(--border); border-radius: 8px;
+  color: var(--text); font-size: 15px; font-weight: 700;
+  padding: 8px 10px 8px 26px; outline: none;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  transition: border-color var(--ease);
 }
-.btn:hover { background: var(--blue-lt); }
+.search-bar input[type="text"]::placeholder {
+  text-transform: none; font-weight: 400; color: var(--dim); letter-spacing: 0;
+}
+.search-bar input[type="text"]:focus { border-color: var(--green); }
+.search-bar select {
+  background: var(--bg2); border: 1.5px solid var(--border);
+  border-radius: 8px; color: var(--text); font-size: 14px;
+  padding: 8px 10px; outline: none; cursor: pointer;
+  transition: border-color var(--ease);
+}
+.search-bar select:focus { border-color: var(--green); }
 
-/* HTMX loading indicator (auto-shown during hx-request) */
+.btn {
+  background: var(--green); border: none; border-radius: 8px;
+  color: #000; font-size: 14px; font-weight: 700;
+  padding: 8px 22px; cursor: pointer;
+  transition: opacity var(--ease); white-space: nowrap;
+}
+.btn:hover  { opacity: 0.85; }
+.btn:active { opacity: 0.7; }
+
+/* HTMX spinner */
 .htmx-indicator { display: none; }
 .htmx-request .htmx-indicator,
 .htmx-request.htmx-indicator { display: flex !important; }
-#spinner {
-  align-items: center; gap: 6px;
-  color: var(--dim); font-size: 12px;
-}
+#spinner { align-items: center; gap: 7px; color: var(--dim); font-size: 12px; }
 #spinner::before {
-  content: '';
-  width: 14px; height: 14px; flex-shrink: 0;
-  border: 2px solid var(--border); border-top-color: var(--blue);
-  border-radius: 50%; animation: spin .6s linear infinite;
+  content: ''; width: 14px; height: 14px; flex-shrink: 0;
+  border: 2px solid var(--border); border-top-color: var(--green);
+  border-radius: 50%; animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Results panel ── */
-#results {
-  flex: 1; overflow-y: auto; padding: 24px 28px;
-}
-#results::-webkit-scrollbar { width: 5px; }
-#results::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+/* ── Results ── */
+#results { flex: 1; overflow-y: auto; padding: 24px; }
+#results::-webkit-scrollbar { width: 4px; }
+#results::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-/* Fade-in on DOM insertion (fires on HTMX swap) */
-#results > * {
-  animation: fadein .15s ease;
-}
+#results > * { animation: fadein 0.18s ease; }
 @keyframes fadein {
-  from { opacity: 0; transform: translateY(5px); }
+  from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: none; }
 }
 
 .placeholder {
-  text-align: center; color: var(--dim); margin-top: 72px;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; min-height: 55vh;
+  color: var(--dim); text-align: center; gap: 10px;
 }
-.placeholder .icon { font-size: 36px; margin-bottom: 10px; }
-.placeholder h2 { font-size: 19px; color: var(--text); margin-bottom: 5px; }
-.placeholder p  { font-size: 13px; }
+.placeholder .icon { font-size: 42px; }
+.placeholder h2    { font-size: 20px; font-weight: 700; color: var(--text); }
+.placeholder p     { font-size: 14px; max-width: 280px; line-height: 1.6; }
 .placeholder kbd {
   background: var(--bg3); border: 1px solid var(--border);
-  border-radius: 4px; padding: 1px 6px;
+  border-radius: 5px; padding: 1px 7px;
   font-size: 12px; font-family: var(--mono);
 }
-.error { color: var(--red); padding: 16px; }
+.error { color: var(--red); padding: 24px; text-align: center; }
 
-/* ── Agent HTML output ── */
-.result-wrap {
-  max-width: 800px; margin: 0 auto; line-height: 1.65;
-}
-.result-wrap b  { color: #f0f6fc; font-weight: 600; }
-.result-wrap i  { color: var(--dim); font-style: italic; }
-
+/* ── Agent output ── */
+.result-wrap { max-width: 820px; margin: 0 auto; line-height: 1.65; }
+.result-wrap b { color: var(--text); font-weight: 600; }
+.result-wrap i { color: var(--dim); font-style: italic; }
 .result-wrap code {
   background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 5px; padding: 3px 7px;
+  border-radius: 6px; padding: 3px 8px;
   font-family: var(--mono); font-size: 13px;
   color: var(--code-fg); white-space: pre-wrap;
 }
-
-/* Critical <pre> settings for ASCII box-drawing and P&L charts */
 .result-wrap pre {
   font-family: var(--mono);
   font-size: 13px;
-  line-height: 1.45;          /* 1.45 not 1.55 — glyphs connect across lines */
-  letter-spacing: 0;          /* Explicit 0 — any gap breaks box-drawing alignment */
-  font-variant-ligatures: none;               /* Disable -- → — and -> → arrow */
-  font-feature-settings: "liga" 0, "calt" 0; /* Belt-and-suspenders ligature off */
-  -webkit-font-smoothing: auto;               /* Not antialiased — thins box chars */
+  line-height: 1.45;
+  letter-spacing: 0;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  -webkit-font-smoothing: auto;
   white-space: pre;
   overflow-x: auto;
-  background: #0a0e14;
+  background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 14px 16px;
+  border-radius: var(--radius);
+  padding: 14px 18px;
   margin: 6px 0 12px;
-  color: #c9d1d9;
+  color: var(--text);
   tab-size: 4;
 }
 .result-wrap pre::-webkit-scrollbar { height: 3px; }
 .result-wrap pre::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-/* ── Theme variants (Financial Dark Theme Palette finding) ── */
-body.phosphor {
-  --bg:      #000;     --bg2:     #050f05;  --bg3:     #0a1a0a;
-  --border:  #0d2a0d; --text:    #00ff41;  --dim:     #00802a;
-  --green:   #00ff41; --red:     #ff4444;  --yellow:  #ffd700;
-  --code-fg: #00ff41; --blue:    #00cc88;  --blue-lt: #00ffaa;
-}
-body.phosphor .result-wrap pre {
-  background: #000; color: #00e63a;
-  text-shadow: 0 0 7px rgba(0,255,65,0.28);
-  border-color: #0d2a0d;
-}
-body.amber {
-  --bg:      #0a0800; --bg2:     #110e00;  --bg3:     #1a1600;
-  --border:  #2a2000; --text:    #ffb000;  --dim:     #80600a;
-  --green:   #90ee90; --red:     #ff6060;  --yellow:  #ffd700;
-  --code-fg: #ffc844; --blue:    #60aaff;  --blue-lt: #88ccff;
-}
-body.amber .result-wrap pre {
-  background: #080600; color: #ffa500;
-  text-shadow: 0 0 5px rgba(255,176,0,0.22);
-  border-color: #2a2000;
-}
+/* ── Color classes (added by enhanceOutput) ── */
+.pos { color: var(--green) !important; font-weight: 600; }
+.neg { color: var(--red)   !important; font-weight: 600; }
+.pct { color: var(--yellow) !important; }
 
-/* Theme toggle buttons */
-.theme-btns { display: flex; gap: 3px; margin-left: 6px; }
-.theme-btn {
-  background: none; border: 1px solid var(--border);
-  border-radius: 4px; font-size: 13px; padding: 2px 7px;
-  cursor: pointer; color: var(--dim); transition: all .12s; line-height: 1.4;
-}
-.theme-btn:hover        { border-color: var(--text); color: var(--text); }
-.theme-btn.active       { border-color: var(--blue); background: var(--bg3); color: var(--text); }
-
-/* ── Output colorization (injected by enhanceOutput()) ── */
-.pos      { color: var(--green)  !important; font-weight: 600; }
-.neg      { color: var(--red)    !important; font-weight: 600; }
-.pct      { color: var(--yellow) !important; }
-
-/* Highlighted rows inside <pre> blocks */
 .star-row {
   display: block; width: 100%;
-  background: rgba(210,153,34,0.13);
+  background: rgba(245,197,24,0.1);
   border-left: 3px solid var(--yellow);
-  padding-left: 3px; margin-left: -3px;
+  padding-left: 4px; margin-left: -4px;
 }
 .atm-row {
   display: block; width: 100%;
-  background: rgba(31,111,235,0.13);
+  background: rgba(56,125,255,0.09);
   border-left: 3px solid var(--blue);
-  padding-left: 3px; margin-left: -3px;
+  padding-left: 4px; margin-left: -4px;
 }
+body.light .star-row { background: rgba(184,120,0,0.1); }
+body.light .atm-row  { background: rgba(0,80,208,0.07); }
 
-/* ── Mobile responsive ── */
-.hamburger {
-  display: none;
-  background: none; border: none; color: var(--text);
-  font-size: 20px; cursor: pointer; padding: 4px 6px; line-height: 1;
-  flex-shrink: 0;
-}
+/* ── Sidebar backdrop ── */
 .sidebar-backdrop {
   display: none; position: fixed; inset: 0;
-  background: rgba(0,0,0,0.55); z-index: 50;
+  background: rgba(0,0,0,0.5); z-index: 50;
 }
 
-@media (max-width: 660px) {
-  .hamburger { display: flex; align-items: center; }
+/* ── Bottom nav (mobile only) ── */
+.bottom-nav {
+  display: none;
+  position: fixed; bottom: 0; left: 0; right: 0;
+  height: 58px; z-index: 40;
+  background: var(--bg); border-top: 1px solid var(--border);
+}
+.bottom-nav a {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 3px; text-decoration: none;
+  color: var(--dim); font-size: 10px; font-weight: 600;
+  transition: color var(--ease); letter-spacing: 0.02em;
+}
+.bottom-nav a .bn-icon { font-size: 22px; line-height: 1; }
+.bottom-nav a.active   { color: var(--green); }
 
-  /* Sidebar becomes a slide-in drawer */
+/* ── Mobile ── */
+@media (max-width: 660px) {
+  .hamburger { display: flex; }
+  .nav-links  { display: none; }
+  .logo-text  { display: none; }
+
   aside {
-    position: fixed; left: -240px; top: 0; height: 100%; width: 240px;
-    z-index: 100; transition: left .25s cubic-bezier(.4,0,.2,1);
-    box-shadow: 4px 0 24px rgba(0,0,0,.45);
+    position: fixed; left: -250px; top: 0; height: 100%; width: 250px;
+    z-index: 100; transition: left 0.25s cubic-bezier(.4,0,.2,1);
+    box-shadow: 4px 0 32px rgba(0,0,0,0.4);
   }
   aside.open { left: 0; }
   .sidebar-backdrop.open { display: block; }
 
-  /* Header: tighter */
-  header { padding: 8px 12px; gap: 6px; }
-  header h1 { font-size: 14px; }
-  .badge { display: none; }
-  .nav-links { gap: 2px; }
-  .nav-link { font-size: 11px; padding: 3px 6px; }
-  .theme-btns { gap: 2px; margin-left: 2px; }
-  .theme-btn { font-size: 12px; padding: 2px 5px; }
+  header { padding: 0 12px; gap: 8px; }
+  .theme-toggle { margin-left: auto; }
 
-  /* Search bar: wrap into two rows */
-  .search-bar { padding: 8px 12px; }
-  .search-bar form { flex-wrap: wrap; gap: 6px; width: 100%; }
-  .search-bar input  { flex: 1 1 80px; min-width: 0; }
-  .search-bar select { flex: 1 1 100px; min-width: 0; }
+  .search-bar { padding: 10px 14px; }
+  .search-form { flex-wrap: wrap; gap: 8px; width: 100%; }
+  .ticker-wrap { flex: 1 1 100px; min-width: 0; }
+  .search-bar select { flex: 1 1 120px; min-width: 0; }
   .btn { flex: 0 0 auto; }
 
-  /* Results: less padding, full width */
-  #results { padding: 12px; }
+  #results { padding: 14px; padding-bottom: 72px; }
   .result-wrap { max-width: 100%; }
+  .result-wrap pre  { font-size: 11.5px; line-height: 1.42; padding: 10px 12px; }
+  .result-wrap code { display: block; overflow-x: auto; white-space: pre; font-size: 12px; }
+  .placeholder { min-height: 48vh; }
+  .placeholder .icon { font-size: 34px; }
 
-  /* Pre blocks: smaller font, horizontal scroll intact */
-  .result-wrap pre {
-    font-size: 11.5px;
-    line-height: 1.42;
-    padding: 10px 12px;
-  }
-
-  /* Code blocks: allow horizontal scroll instead of wrapping */
-  .result-wrap code {
-    display: block;
-    overflow-x: auto;
-    white-space: pre;
-    font-size: 12px;
-    padding: 10px 12px;
-  }
-
-  /* Placeholder: less top margin */
-  .placeholder { margin-top: 40px; }
-  .placeholder .icon { font-size: 28px; }
-  .placeholder h2 { font-size: 16px; }
+  .bottom-nav { display: flex; }
 }
 
 /* ── UI Research page ── */
-.research-report h2 {
-  font-size: 18px; margin-bottom: 6px;
-}
+.research-report h2 { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
 .research-report h3 {
-  font-size: 14px; color: var(--dim); margin: 18px 0 10px;
-  text-transform: uppercase; letter-spacing: .05em;
+  font-size: 10px; font-weight: 700; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.08em; margin: 24px 0 12px;
 }
 .research-card {
   background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;
+  border-radius: var(--radius); padding: 16px 18px; margin-bottom: 10px;
 }
-.research-card.done   { border-left: 3px solid var(--green); }
+.research-card.done    { border-left: 3px solid var(--green); }
 .research-card.pending { border-left: 3px solid var(--yellow); }
 .rc-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-.rc-topic  { font-weight: 600; font-size: 14px; flex: 1; }
+.rc-topic  { font-weight: 700; font-size: 14px; flex: 1; }
 .rc-status { font-size: 12px; color: var(--dim); }
 .rc-score  { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
-.rc-summary, .rc-rec { font-size: 13px; line-height: 1.55; margin-bottom: 6px; }
-.rc-rec    { color: var(--code-fg); }
-.rc-footer { font-size: 11px; color: var(--dim); margin-top: 10px;
-             display: flex; align-items: center; gap: 10px; }
+.rc-summary, .rc-rec { font-size: 13px; line-height: 1.6; margin-bottom: 6px; }
+.rc-rec { color: var(--code-fg); }
+.rc-footer {
+  font-size: 11px; color: var(--dim); margin-top: 10px;
+  display: flex; align-items: center; gap: 10px;
+}
 .btn-impl {
   background: var(--bg3); border: 1px solid var(--border);
-  border-radius: 4px; color: var(--text); font-size: 11px;
+  border-radius: 5px; color: var(--text); font-size: 11px;
   padding: 2px 8px; cursor: pointer;
 }
-.btn-impl:hover { background: var(--blue); border-color: var(--blue); }
+.btn-impl:hover { background: var(--green); border-color: var(--green); color: #000; }
 """
 
 
@@ -553,16 +581,29 @@ def _page(history: list[dict], active_tab: str = "search",
     sidebar = _sidebar_items(history)
     search_content = (body_override if body_override else
         '<div class="placeholder">'
-        '<div class="icon">🔭</div>'
+        '<div class="icon">📊</div>'
         '<h2>Options Research</h2>'
-        '<p>Type a ticker and press <kbd>Enter</kbd> to analyse.</p>'
+        '<p>Enter a ticker and outlook to get a vertical spread analysis.</p>'
         '</div>')
+
+    _tabs = [
+        ("search",   "/",            "🔍", "Search"),
+        ("ibkr",     "/ibkr",        "⚡", "IBKR"),
+        ("research", "/ui-research", "🔬", "Research"),
+        ("test",     "/test",        "✅", "Tests"),
+    ]
+    bottom_nav = "".join(
+        f'<a href="{url}" class="{"active" if t == active_tab else ""}">'
+        f'<span class="bn-icon">{icon}</span>{label}</a>'
+        for t, url, icon, label in _tabs
+    )
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Financial Research Agent</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>FinAgent</title>
   <script src="https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js" defer></script>
   <style>{_CSS}</style>
 </head>
@@ -570,56 +611,57 @@ def _page(history: list[dict], active_tab: str = "search",
   <div class="sidebar-backdrop" id="backdrop" onclick="closeSidebar()"></div>
 
   <header>
-    <button class="hamburger" onclick="toggleSidebar()" aria-label="History">☰</button>
-    <h1>📊 Financial Research</h1>
-    <span class="badge">Options</span>
+    <button class="hamburger" onclick="toggleSidebar()" aria-label="Menu">☰</button>
+    <a href="/" class="logo">
+      <div class="logo-mark">F</div>
+      <span class="logo-text">FinAgent</span>
+    </a>
     <nav class="nav-links">
       <a href="/"            class="nav-link {'active' if active_tab=='search'   else ''}">Search</a>
       <a href="/ibkr"        class="nav-link {'active' if active_tab=='ibkr'     else ''}">IBKR</a>
-      <a href="/ui-research" class="nav-link {'active' if active_tab=='research' else ''}">UI Research</a>
+      <a href="/ui-research" class="nav-link {'active' if active_tab=='research' else ''}">Research</a>
       <a href="/test"        class="nav-link {'active' if active_tab=='test'     else ''}">Tests</a>
     </nav>
-    <div class="theme-btns">
-      <button class="theme-btn" id="t-default"  onclick="setTheme('')"         title="Default dark">🌙</button>
-      <button class="theme-btn" id="t-phosphor" onclick="setTheme('phosphor')" title="Phosphor green">💚</button>
-      <button class="theme-btn" id="t-amber"    onclick="setTheme('amber')"    title="Amber terminal">🟡</button>
+    <div class="theme-toggle">
+      <button class="theme-btn" id="t-dark"  onclick="setTheme('dark')"  title="Dark">🌙</button>
+      <button class="theme-btn" id="t-light" onclick="setTheme('light')" title="Light">☀️</button>
     </div>
   </header>
 
-  <div class="main">
+  <div class="app-layout">
     <aside id="sidebar">
       <div class="sidebar-hdr">Recent Searches</div>
       <div id="history-list">{sidebar}</div>
     </aside>
 
     <div class="content">
-      <!-- Search bar — HTMX form -->
       <div class="search-bar">
-        <form hx-post="/search"
+        <form class="search-form"
+              hx-post="/search"
               hx-target="#results"
               hx-swap="innerHTML"
-              hx-indicator="#spinner"
-              style="display:flex;gap:8px;align-items:center">
-          <input name="ticker" type="text" placeholder="AAPL" maxlength="6"
-                 autocomplete="off" autocapitalize="characters" autofocus />
+              hx-indicator="#spinner">
+          <div class="ticker-wrap">
+            <input name="ticker" type="text" placeholder="AAPL" maxlength="6"
+                   autocomplete="off" autocapitalize="characters" autofocus />
+          </div>
           <select name="outlook">
             <option value="bullish">📈 Bullish</option>
             <option value="bearish">📉 Bearish</option>
             <option value="neutral">↔️ Neutral</option>
           </select>
-          <button class="btn" type="submit">Research</button>
+          <button class="btn" type="submit">Analyze</button>
           <div id="spinner" class="htmx-indicator">Fetching…</div>
         </form>
       </div>
 
-      <div id="results">
-        {search_content}
-      </div>
+      <div id="results">{search_content}</div>
     </div>
   </div>
 
+  <nav class="bottom-nav">{bottom_nav}</nav>
+
   <script>
-    // ── Sidebar drawer (mobile) ───────────────────────────────────────────────
     function toggleSidebar() {{
       document.getElementById('sidebar').classList.toggle('open');
       document.getElementById('backdrop').classList.toggle('open');
@@ -628,22 +670,18 @@ def _page(history: list[dict], active_tab: str = "search",
       document.getElementById('sidebar').classList.remove('open');
       document.getElementById('backdrop').classList.remove('open');
     }}
-    // Close sidebar after picking a history item on mobile
     document.body.addEventListener('htmx:afterRequest', e => {{
       if (e.detail.elt.classList.contains('h-item')) closeSidebar();
     }});
 
-    // ── Theme toggle ─────────────────────────────────────────────────────────
     function setTheme(t) {{
-      ['phosphor','amber'].forEach(x => document.body.classList.remove(x));
-      if (t) document.body.classList.add(t);
+      document.body.classList.toggle('light', t === 'light');
       localStorage.setItem('theme', t);
       document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
-      document.getElementById('t-' + (t || 'default')).classList.add('active');
+      document.getElementById('t-' + t).classList.add('active');
     }}
-    setTheme(localStorage.getItem('theme') || '');
+    setTheme(localStorage.getItem('theme') || 'dark');
 
-    // ── Active sidebar item ───────────────────────────────────────────────────
     function setActive(id) {{
       document.querySelectorAll('.h-item')
         .forEach(el => el.classList.toggle('active', +el.dataset.id === id));
@@ -653,9 +691,7 @@ def _page(history: list[dict], active_tab: str = "search",
         document.querySelectorAll('.h-item').forEach(el => el.classList.remove('active'));
     }});
 
-    // ── Output colorization ───────────────────────────────────────────────────
     function enhanceOutput() {{
-      // Colorize <pre> blocks: highlight rows, colour +/- dollar amounts
       document.querySelectorAll('.result-wrap pre').forEach(pre => {{
         pre.innerHTML = pre.innerHTML
           .split('\\n')
@@ -668,8 +704,6 @@ def _page(history: list[dict], active_tab: str = "search",
           .replace(/(\\+\\$[\\d,.]+)/g, '<span class="pos">$1</span>')
           .replace(/(-\\$[\\d,.]+)/g,  '<span class="neg">$1</span>');
       }});
-
-      // Colorize metrics <code> block (contains POP / P50 / Max profit)
       document.querySelectorAll('.result-wrap code').forEach(code => {{
         if (!code.textContent.includes('POP')) return;
         code.innerHTML = code.innerHTML

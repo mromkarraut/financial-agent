@@ -31,3 +31,25 @@ LONG_MESSAGE_THRESHOLD: int = int(os.environ.get("LONG_MESSAGE_THRESHOLD", "300"
 # ── Web UI ─────────────────────────────────────────────────────────────────────
 # URL of the FastAPI web server, sent as a link in Telegram replies.
 WEB_SERVER_URL: str = os.environ.get("WEB_SERVER_URL", "http://localhost:8000")
+
+# ── MCP Agent LLM ─────────────────────────────────────────────────────────────
+# Controls the LLM used by every MCP server in mcp_servers/.
+# Change MCP_LLM_PROVIDER + MCP_LLM_MODEL in .env to switch providers globally.
+#
+#   Provider       | Base URL                          | Key required
+#   ───────────────┼───────────────────────────────────┼──────────────────────
+#   lmstudio       | MCP_LLM_BASE_URL (localhost:1234) | none (uses "lm-studio")
+#   anthropic      | Anthropic API                     | ANTHROPIC_API_KEY
+#   openai         | OpenAI API                        | OPENAI_API_KEY
+#
+# Example .env for LM Studio:
+#   MCP_LLM_PROVIDER=lmstudio
+#   MCP_LLM_MODEL=qwen2.5-7b-instruct    # must match model loaded in LM Studio
+#   MCP_LLM_BASE_URL=http://localhost:1234/v1
+#   MCP_LLM_MAX_TOKENS=512
+#
+MCP_LLM_PROVIDER: str = os.environ.get("MCP_LLM_PROVIDER", "lmstudio")
+MCP_LLM_MODEL: str    = os.environ.get("MCP_LLM_MODEL", os.environ.get("LLM_MODEL", "local-model"))
+MCP_LLM_BASE_URL: str = os.environ.get("MCP_LLM_BASE_URL", os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"))
+MCP_LLM_MAX_TOKENS: int = int(os.environ.get("MCP_LLM_MAX_TOKENS", "512"))
+OPENAI_API_KEY: str   = os.environ.get("OPENAI_API_KEY", "")

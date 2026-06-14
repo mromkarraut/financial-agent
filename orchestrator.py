@@ -27,8 +27,8 @@ from agents.base_agent import AgentResult
 from agents.fundamentals_agent import FundamentalsAgent
 from agents.options_agent import OptionsAgent
 from agents.options_research_agent import OptionsResearchAgent
-from agents.stock_research import StockResearchAgent
-from agents.summarizer import SummarizerAgent
+from agents.stock_research_agent import StockResearchAgent
+from agents.summarizer_agent import SummarizerAgent
 from agents.watchlist_agent import WatchlistAgent
 from db.database import log_agent_call, log_message
 from db.memory import MemoryManager

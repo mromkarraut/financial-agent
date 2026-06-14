@@ -366,6 +366,33 @@ def _fmt_detail_card(s: dict, price: float) -> str:
         n3 = f"Maximum gain of <b>${s['max_profit']}</b> is locked in above ${s['sell_strike']:.0f}."
 
     theta_str = f"{'+' if s['pos_theta'] >= 0 else ''}${s['pos_theta']:.2f}"
+    col = 16  # left-column width
+
+    def row(label: str, value: str) -> str:
+        return f"{label:<{col}}│  {value}\n"
+
+    def divider() -> str:
+        return f"{'─' * col}┼{'─' * 20}\n"
+
+    table = (
+        f"{'Metric':<{col}}│  Value\n"
+        f"{'─' * col}┼{'─' * 20}\n"
+        + row(f"Sell {opt_word}", f"${s['sell_strike']:.0f}  @  ${s['sell_price']:.2f}/share")
+        + row(f"Buy {opt_word}",  f"${s['buy_strike']:.0f}  @  ${s['buy_price']:.2f}/share")
+        + divider()
+        + row(net_label,          f"{net_sign}{per_share}  ({per_cont}/contract)")
+        + row("Break-even",       f"${s['breakeven']}")
+        + divider()
+        + row("POP",              f"{s['pop']*100:.0f}%")
+        + row("P50",              f"{s['p50']*100:.0f}%")
+        + divider()
+        + row("Max profit",       f"+${s['max_profit']}")
+        + row("Max loss",         f"-${s['max_loss']}")
+        + row("ROC",              f"{s['roc']:.1f}%")
+        + row("Theta",            f"{theta_str}/day")
+        + row("Delta",            f"{s['pos_delta']:+.3f}")
+        + row("Spread",           f"${s['spread']:.0f}")
+    ).rstrip("\n")
 
     return (
         f"<b>The Legs :</b>  {sell_leg}\n"
@@ -376,21 +403,8 @@ def _fmt_detail_card(s: dict, price: float) -> str:
         f"  {n2}\n"
         f"  {n3}\n\n"
 
-        f"<b>Key Numbers</b>\n"
-        f"<code>"
-        f"SELL  {opt_word} ${s['sell_strike']:.0f}   @ ${s['sell_price']:.2f}/share\n"
-        f"BUY   {opt_word} ${s['buy_strike']:.0f}   @ ${s['buy_price']:.2f}/share\n"
-        f"{'─' * 34}\n"
-        f"{net_label:<12} {net_sign}{per_share}  ({per_cont}/contract)\n"
-        f"Break-even   ${s['breakeven']}\n"
-        f"\n"
-        f"Probability of profit    {s['pop']*100:.0f}%\n"
-        f"Prob. of 50% profit      {s['p50']*100:.0f}%\n"
-        f"\n"
-        f"Max profit   ${s['max_profit']}  |  Max loss  -${s['max_loss']}\n"
-        f"ROC          {s['roc']:.1f}%    |  Theta     {theta_str}/day\n"
-        f"Delta        {s['pos_delta']:+.3f}   |  Spread    ${s['spread']:.0f}"
-        f"</code>"
+        f"<b>Key Numbers</b>\n\n"
+        f"<code>{table}</code>"
     )
 
 

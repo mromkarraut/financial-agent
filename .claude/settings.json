@@ -1,0 +1,63 @@
+{
+  "mcpServers": {
+    "browser-tools": {
+      "command": "npx",
+      "args": ["-y", "@agentdeskai/browser-tools-mcp@latest"],
+      "description": "AgentDeskAI browser tools — console logs, screenshots, Lighthouse audits. Requires browser-tools-server + Chrome extension running."
+    },
+    "financial-stock-research": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.stock_research.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-fundamentals": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.fundamentals.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-options-research": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.options_research.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-watchlist": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.watchlist.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-summarizer": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.summarizer.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-ibkr": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.ibkr.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-heartbeat": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.heartbeat.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-tester": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.tester.server"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    },
+    "financial-registry": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.registry", "--serve"],
+      "cwd": "/home/omkar/repos/financial-agent",
+      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
+    }
+  }
+}
