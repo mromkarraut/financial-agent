@@ -30,6 +30,12 @@ from mcp_servers.llm import get_llm_client
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config  # noqa: E402
+
+def _paper_header() -> str:
+    if config.IBKR_PAPER_TRADING:
+        return "📄 [PAPER TRADING — no real money]\n\n"
+    return "⚠ [LIVE TRADING — REAL MONEY]\n\n"
+
 from agents.ibkr_agent import (  # noqa: E402
     auth_status, cancel_order as _cancel,
     get_accounts, get_orders, order_history,
@@ -184,6 +190,7 @@ async def place_spread(
 
     summary = _spread_summary(ticker, short_strike, long_strike, right, expiry, net_price, quantity)
     return (
+        f"{_paper_header()}"
         f"{icon} Order {'Submitted' if icon=='✅' else 'Status: '+status}\n\n"
         f"{summary}\n\n"
         f"IBKR Order ID  {order_id}\n"
@@ -222,7 +229,7 @@ async def get_risk_briefing(
 
     ms = int((time.monotonic() - t0) * 1000)
     await _log_call("get_risk_briefing", ms, f"{ticker} {right}{short_strike}/{long_strike}")
-    return f"{summary}\n\nRisk Briefing:\n{briefing}"
+    return f"{_paper_header()}{summary}\n\nRisk Briefing:\n{briefing}"
 
 
 @mcp.tool()

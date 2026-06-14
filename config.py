@@ -53,3 +53,25 @@ MCP_LLM_MODEL: str    = os.environ.get("MCP_LLM_MODEL", os.environ.get("LLM_MODE
 MCP_LLM_BASE_URL: str = os.environ.get("MCP_LLM_BASE_URL", os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"))
 MCP_LLM_MAX_TOKENS: int = int(os.environ.get("MCP_LLM_MAX_TOKENS", "512"))
 OPENAI_API_KEY: str   = os.environ.get("OPENAI_API_KEY", "")
+
+# ── IBKR Gateway ──────────────────────────────────────────────────────────────
+# IBKR_PAPER_TRADING=true (default) — use paper trading account (DU prefix).
+# IBKR_PAPER_TRADING=false          — use live account (U prefix). REAL MONEY.
+#
+# Gateway is auto-started by start.py. To run manually:
+#   cd ibkr_gateway && ./bin/run.sh root/conf.paper.yaml
+# Then open https://localhost:5000 in Chrome and log in with PAPER credentials.
+#
+_ibkr_paper_raw = os.environ.get("IBKR_PAPER_TRADING", "true").strip().lower()
+IBKR_PAPER_TRADING: bool = _ibkr_paper_raw in ("1", "true", "yes")
+IBKR_GATEWAY_CONF: str   = os.environ.get(
+    "IBKR_GATEWAY_CONF",
+    "root/conf.paper.yaml" if IBKR_PAPER_TRADING else "root/conf.yaml",
+)
+IBKR_GATEWAY_URL: str  = os.environ.get("IBKR_GATEWAY_URL", "https://localhost:5000")
+IBKR_GATEWAY_DIR: str  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ibkr_gateway")
+# Java executable — uses Windows Java via WSL interop by default
+IBKR_JAVA_BIN: str = os.environ.get(
+    "IBKR_JAVA_BIN",
+    "/mnt/c/Program Files/Java/jre1.8.0_461/bin/java.exe",
+)

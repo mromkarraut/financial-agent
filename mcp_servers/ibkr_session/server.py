@@ -39,6 +39,15 @@ from agents.ibkr_agent import (  # noqa: E402
     reauthenticate, tickle,
 )
 
+# Paper accounts start with "DU"; live accounts start with "U"
+def _is_paper_account(account_id: str) -> bool:
+    return account_id.upper().startswith("DU")
+
+def _trading_mode_label(account_id: str) -> str:
+    if _is_paper_account(account_id):
+        return "📄 PAPER TRADING"
+    return "⚠ LIVE TRADING — REAL MONEY"
+
 logger = logging.getLogger(__name__)
 
 _ROOT    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -157,18 +166,30 @@ async def get_auth_status() -> str:
         return (
             f"Gateway: UNREACHABLE\n"
             f"Error: {err}\n\n"
-            f"Start the gateway:\n"
-            f"  cd ibkr_gateway && ./bin/run.sh root/conf.yaml\n"
-            f"Then open https://localhost:5000 in Chrome."
+            f"Start the gateway (paper trading default):\n"
+            f"  python start.py\n"
+            f"Or manually: cd ibkr_gateway && ./bin/run.sh root/conf.paper.yaml\n"
+            f"Then open https://localhost:5000 in Chrome with PAPER credentials."
         )
+
+    # Auto-detect trading mode from account ID prefix (DU = paper, U = live)
+    mode_label = "Unknown"
+    if auth and conn:
+        try:
+            accounts = await get_accounts()
+            if accounts:
+                mode_label = _trading_mode_label(accounts[0])
+        except Exception:
+            pass
 
     icon = "✅" if (auth and conn) else "❌"
     return (
         f"Gateway Status  {icon}\n\n"
+        f"Mode          : {mode_label}\n"
         f"Authenticated : {'Yes ✅' if auth else 'No ❌'}\n"
         f"Connected     : {'Yes ✅' if conn else 'No ❌'}\n"
-        f"Tickle loop   : {'running' if _tickle_task and not _tickle_task.done() else 'stopped'}\n"
-        f"Checked in    : {ms}ms"
+        f"Tickle loop   : {'running ✅' if _tickle_task and not _tickle_task.done() else 'stopped ❌'}\n"
+        f"Response time : {ms}ms"
     )
 
 

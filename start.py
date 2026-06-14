@@ -2,55 +2,63 @@
 """
 start.py — launch the full financial agent stack
 
-  python start.py              # all services
-  python start.py --no-lms    # skip LM Studio (already running)
-  python start.py --browser   # also start browser-tools-server on port 3025
-  python start.py --web-only  # web dashboard only (no Telegram bot)
+  python start.py                # all services + IBKR gateway (paper trading)
+  python start.py --no-lms      # skip LM Studio (already running)
+  python start.py --no-gateway  # skip IBKR gateway (already running or not needed)
+  python start.py --live        # use LIVE trading account (USE WITH CAUTION)
+  python start.py --browser     # also start browser-tools-server on port 3025
+  python start.py --web-only    # web dashboard only, no Telegram bot
 
-Logs → logs/web.log, logs/browser.log  (bot runs in foreground so output is live)
+Logs → logs/web.log, logs/gateway.log, logs/browser.log
 """
 
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT         = os.path.dirname(os.path.abspath(__file__))
-VENV         = "/home/omkar/venvs/bin"
-PYTHON       = f"{VENV}/python"
-UVICORN      = f"{VENV}/uvicorn"
-LMS          = "/mnt/c/Users/User/AppData/Local/Programs/LM Studio/resources/app/.webpack/lms.exe"
-DB_PATH      = os.path.join(ROOT, "db", "state.db")
-LOG_DIR      = os.path.join(ROOT, "logs")
+ROOT    = os.path.dirname(os.path.abspath(__file__))
+VENV    = "/home/omkar/venvs/bin"
+PYTHON  = f"{VENV}/python"
+UVICORN = f"{VENV}/uvicorn"
+LMS     = "/mnt/c/Users/User/AppData/Local/Programs/LM Studio/resources/app/.webpack/lms.exe"
+JAVA    = "/mnt/c/Program Files/Java/jre1.8.0_461/bin/java.exe"
+GW_DIR  = os.path.join(ROOT, "ibkr_gateway")
+DB_PATH = os.path.join(ROOT, "db", "state.db")
+LOG_DIR = os.path.join(ROOT, "logs")
 
-# ── ANSI helpers ───────────────────────────────────────────────────────────────
-G  = "\033[32m"   # green
-Y  = "\033[33m"   # yellow
-R  = "\033[31m"   # red
-B  = "\033[34m"   # blue
-DIM= "\033[2m"
-RST= "\033[0m"
+# ── ANSI ───────────────────────────────────────────────────────────────────────
+G   = "\033[32m"
+Y   = "\033[33m"
+R   = "\033[31m"
+B   = "\033[34m"
+M   = "\033[35m"   # magenta — used for paper trading warnings
+DIM = "\033[2m"
+RST = "\033[0m"
 
-def ok(msg):   print(f"  {G}✓{RST}  {msg}")
-def warn(msg): print(f"  {Y}⚠{RST}  {msg}")
-def err(msg):  print(f"  {R}✗{RST}  {msg}")
-def step(msg): print(f"\n{B}▶{RST}  {msg}")
+def ok(msg):    print(f"  {G}✓{RST}  {msg}")
+def warn(msg):  print(f"  {Y}⚠{RST}  {msg}")
+def err(msg):   print(f"  {R}✗{RST}  {msg}")
+def step(msg):  print(f"\n{B}▶{RST}  {msg}")
+def paper(msg): print(f"  {M}📄{RST}  {msg}")
 
 # ── Process registry ───────────────────────────────────────────────────────────
 _procs: list[tuple[str, subprocess.Popen]] = []
 
 
-def _launch(name: str, cmd: list[str], log_file: str | None = None, **kwargs) -> subprocess.Popen:
+def _launch(name: str, cmd: list[str], cwd: str = ROOT,
+            log_file: str | None = None, **kwargs) -> subprocess.Popen:
     if log_file:
         os.makedirs(LOG_DIR, exist_ok=True)
         fh = open(log_file, "a")
-        p  = subprocess.Popen(cmd, cwd=ROOT, stdout=fh, stderr=fh, **kwargs)
+        p  = subprocess.Popen(cmd, cwd=cwd, stdout=fh, stderr=fh, **kwargs)
         ok(f"{name}  {DIM}(logs → {os.path.relpath(log_file)}){RST}")
     else:
-        p = subprocess.Popen(cmd, cwd=ROOT, **kwargs)
+        p = subprocess.Popen(cmd, cwd=cwd, **kwargs)
         ok(name)
     _procs.append((name, p))
     return p
@@ -76,21 +84,57 @@ signal.signal(signal.SIGINT,  _stop_all)
 signal.signal(signal.SIGTERM, _stop_all)
 
 
+# ── Gateway helpers ────────────────────────────────────────────────────────────
+
+def _gateway_reachable() -> bool:
+    """Quick TCP check — is something listening on localhost:5000?"""
+    try:
+        with socket.create_connection(("127.0.0.1", 5000), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_for_gateway(timeout: int = 45) -> bool:
+    """Poll until the gateway TCP port is open or timeout expires."""
+    deadline = time.time() + timeout
+    dots = 0
+    while time.time() < deadline:
+        if _gateway_reachable():
+            print()  # newline after dots
+            return True
+        print(".", end="", flush=True)
+        dots += 1
+        time.sleep(2)
+    print()
+    return False
+
+
+def _open_browser(url: str) -> None:
+    """Open URL in Windows Chrome via WSL interop."""
+    try:
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass  # non-critical
+
+
 # ── Steps ──────────────────────────────────────────────────────────────────────
 
 def start_lm_studio() -> None:
     step("LM Studio API server")
     if not os.path.exists(LMS):
-        warn(f"lms.exe not found at {LMS} — skipping")
+        warn(f"lms.exe not found — skipping")
         return
     result = subprocess.run(
-        [LMS, "server", "start"],
-        capture_output=True, text=True, timeout=15,
+        [LMS, "server", "start"], capture_output=True, text=True, timeout=15,
     )
     if result.returncode == 0 or "already" in (result.stdout + result.stderr).lower():
-        ok("LM Studio API running on http://localhost:1234")
+        ok("LM Studio API on http://localhost:1234")
     else:
-        warn(f"lms server start returned {result.returncode}: {result.stderr.strip()[:80]}")
+        warn(f"lms returned {result.returncode}: {result.stderr.strip()[:80]}")
 
 
 def init_db() -> None:
@@ -98,13 +142,93 @@ def init_db() -> None:
     if os.path.exists(DB_PATH):
         ok(f"state.db exists ({os.path.getsize(DB_PATH) // 1024} KB)")
         return
-    ok("Initialising state.db…")
     subprocess.run(
         [PYTHON, "-c",
          "import asyncio; from db.database import init_db; asyncio.run(init_db())"],
         cwd=ROOT, check=True,
     )
     ok("state.db created")
+
+
+def start_gateway(paper: bool = True) -> bool:
+    """
+    Start the IBKR CP Gateway in background.
+    Returns True if the gateway is ready (either was already running or started successfully).
+    """
+    step(f"IBKR CP Gateway  [{'📄 PAPER TRADING' if paper else R+'⚠ LIVE TRADING'+RST}]")
+
+    # Already running?
+    if _gateway_reachable():
+        ok(f"Gateway already running on https://localhost:5000")
+        return True
+
+    # Java check
+    if not os.path.exists(JAVA):
+        warn(f"Java not found at {JAVA}")
+        warn("Install Java or set IBKR_JAVA_BIN in .env")
+        warn("Gateway skipped — start it manually: cd ibkr_gateway && ./bin/run.sh root/conf.paper.yaml")
+        return False
+
+    if not os.path.isdir(GW_DIR):
+        warn(f"ibkr_gateway/ not found — run start.py from the project root")
+        return False
+
+    conf = "root/conf.paper.yaml" if paper else "root/conf.yaml"
+    conf_path = os.path.join(GW_DIR, conf)
+    if not os.path.exists(conf_path):
+        warn(f"Config not found: {conf_path}")
+        return False
+
+    # Build the java command directly (mirrors run.sh logic)
+    runtime_jar = os.path.join(GW_DIR, "dist", "ibgroup.web.core.iblink.router.clientportal.gw.jar")
+    runtime_lib = os.path.join(GW_DIR, "build", "lib", "runtime", "*")
+    classpath   = f"{os.path.join(GW_DIR, 'root')}:{runtime_jar}:{runtime_lib}"
+
+    cmd = [
+        JAVA,
+        "-server",
+        "-Dvertx.disableDnsResolver=true",
+        "-Djava.net.preferIPv4Stack=true",
+        f"-Dvertx.logger-delegate-factory-class-name=io.vertx.core.logging.SLF4JLogDelegateFactory",
+        "-Dnologback.statusListenerClass=ch.qos.logback.core.status.OnConsoleStatusListener",
+        "-Dnolog4j.debug=true",
+        "-Dnolog4j2.debug=true",
+        "-cp", classpath,
+        "ibgroup.web.core.clientportal.gw.GatewayStart",
+        "--conf", f"../{conf}",
+    ]
+
+    _launch(
+        f"IBKR gateway ({'paper' if paper else 'LIVE'})",
+        cmd,
+        cwd=GW_DIR,
+        log_file=os.path.join(LOG_DIR, "gateway.log"),
+    )
+
+    # Wait for TCP port to open (gateway takes ~10-15s to start)
+    print(f"  {DIM}Waiting for gateway to start", end="", flush=True)
+    ready = _wait_for_gateway(timeout=45)
+
+    if ready:
+        ok(f"Gateway ready at https://localhost:5000")
+        mode_label = "PAPER" if paper else "LIVE"
+        print(f"\n  {M}{'━'*54}{RST}")
+        print(f"  {M}  {mode_label} TRADING MODE — Login required{RST}")
+        print(f"  {M}  Open Chrome → https://localhost:5000{RST}")
+        if paper:
+            print(f"  {M}  Use your PAPER TRADING credentials (account starts DU){RST}")
+        else:
+            print(f"  {R}  ⚠ LIVE ACCOUNT — real money at risk{RST}")
+        print(f"  {M}{'━'*54}{RST}\n")
+        # Auto-open browser on Windows
+        _open_browser("https://localhost:5000")
+        # Give user 5 seconds to see the message before bot output scrolls it away
+        time.sleep(5)
+        return True
+    else:
+        warn("Gateway did not start in time — check logs/gateway.log")
+        warn("You can still log in manually once it's ready: https://localhost:5000")
+        return False
 
 
 def start_web() -> subprocess.Popen:
@@ -137,21 +261,27 @@ def start_bot() -> subprocess.Popen:
     return p
 
 
-# ── Banner ─────────────────────────────────────────────────────────────────────
+# ── Banner / status ────────────────────────────────────────────────────────────
 
-def _banner() -> None:
+def _banner(paper: bool) -> None:
+    mode = f"{M}📄 PAPER TRADING{RST}" if paper else f"{R}⚠ LIVE TRADING{RST}"
     print(f"""
 {B}╔══════════════════════════════════════╗
 ║      Financial Agent — starting      ║
-╚══════════════════════════════════════╝{RST}""")
+╚══════════════════════════════════════╝{RST}
+  IBKR mode: {mode}
+  (set IBKR_PAPER_TRADING=false in .env to switch to live)
+""")
 
 
-def _status_line() -> None:
+def _status_line(paper: bool) -> None:
+    mode = f"{M}PAPER{RST}" if paper else f"{R}LIVE ⚠{RST}"
     print(f"""
 {G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RST}
   Web dashboard  →  http://localhost:8000
-  MCP servers    →  auto-started by Claude Code (.claude/settings.json)
-  Logs           →  logs/web.log
+  IBKR Gateway   →  https://localhost:5000  [{mode}]
+  MCP servers    →  auto-started by Claude Code
+  Logs           →  logs/
 {G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RST}
 """)
 
@@ -160,31 +290,39 @@ def _status_line() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Start the financial agent stack")
-    ap.add_argument("--no-lms",   action="store_true", help="Skip LM Studio (already running)")
-    ap.add_argument("--browser",  action="store_true", help="Also start browser-tools-server on port 3025")
-    ap.add_argument("--web-only", action="store_true", help="Start web dashboard only, no Telegram bot")
+    ap.add_argument("--no-lms",     action="store_true", help="Skip LM Studio (already running)")
+    ap.add_argument("--no-gateway", action="store_true", help="Skip IBKR gateway (already running)")
+    ap.add_argument("--live",       action="store_true", help="Use LIVE trading account (real money!)")
+    ap.add_argument("--browser",    action="store_true", help="Also start browser-tools-server on :3025")
+    ap.add_argument("--web-only",   action="store_true", help="Web dashboard only, no Telegram bot")
     args = ap.parse_args()
 
-    _banner()
+    # Paper trading is the default; --live overrides
+    paper = not args.live
+
+    _banner(paper)
 
     if not args.no_lms:
         start_lm_studio()
 
     init_db()
+
+    if not args.no_gateway:
+        start_gateway(paper=paper)
+
     start_web()
 
     if args.browser:
         start_browser_tools()
 
-    # Brief pause so uvicorn is ready before the bot starts
     time.sleep(1.5)
 
     if not args.web_only:
-        _status_line()
+        _status_line(paper)
         bot = start_bot()
         bot.wait()
     else:
-        _status_line()
+        _status_line(paper)
         print(f"{DIM}Web-only mode. Press Ctrl+C to stop.{RST}\n")
         try:
             while True:
