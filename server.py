@@ -236,6 +236,39 @@ async def positions_fragment() -> HTMLResponse:
     return HTMLResponse(await _build_positions_html())
 
 
+@app.get("/fundamentals", response_class=HTMLResponse)
+async def fundamentals_page() -> HTMLResponse:
+    history = await _get_history()
+    body = (
+        '<div class="fund-page">'
+        '<div class="fund-search-bar">'
+        '<form hx-post="/api/fundamentals-fragment" hx-target="#fund-results"'
+        ' hx-swap="innerHTML" hx-indicator="#fund-spin">'
+        '<div class="ticker-wrap">'
+        '<input name="ticker" type="text" placeholder="AAPL" maxlength="10"'
+        ' autocomplete="off" autocapitalize="characters" autofocus />'
+        '</div>'
+        '<button class="btn" type="submit">Look Up</button>'
+        '<div id="fund-spin" class="htmx-indicator">Fetching…</div>'
+        '</form>'
+        '</div>'
+        '<div id="fund-results">'
+        '<div class="placeholder"><div class="icon">🏦</div>'
+        '<p>Enter a ticker to view fundamentals</p></div>'
+        '</div>'
+        '</div>'
+    )
+    return HTMLResponse(_page(history, active_tab="fundamentals", body_override=body, show_search=False))
+
+
+@app.post("/api/fundamentals-fragment", response_class=HTMLResponse)
+async def fundamentals_fragment(ticker: str = Form(...)) -> HTMLResponse:
+    ticker = ticker.strip().upper()
+    if not ticker:
+        return HTMLResponse('<p class="pos-err">Ticker is required.</p>')
+    return HTMLResponse(await _build_fundamentals_html(ticker))
+
+
 @app.get("/ibkr/positions", response_class=HTMLResponse)
 async def ibkr_positions() -> HTMLResponse:
     from mcp_servers.ibkr_positions.server import get_portfolio_summary
@@ -593,6 +626,60 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
 }
 .fund-source:hover { color: var(--text); }
 
+/* ── Fundamentals page ── */
+.fund-page { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.fund-search-bar {
+  padding: 12px 24px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0; display: flex; gap: 10px; align-items: center;
+}
+.fund-search-bar form { display: flex; gap: 10px; align-items: center; }
+.fund-search-bar .ticker-wrap { flex: 0 0 140px; }
+#fund-results { flex: 1; overflow-y: auto; padding: 20px 24px 80px; }
+.fund-full {
+  max-width: 780px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+}
+.fund-full-hdr {
+  padding: 18px 22px 14px; border-bottom: 1px solid var(--border);
+}
+.fund-full-ticker { font-size: 22px; font-weight: 800; }
+.fund-full-name   { font-size: 14px; color: var(--dim); margin-top: 2px; }
+.fund-full-tags   { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.fund-tag {
+  font-size: 11px; font-weight: 600; padding: 2px 8px;
+  border-radius: 20px; background: var(--bg3); color: var(--dim);
+}
+.fund-sections { display: grid; grid-template-columns: 1fr 1fr; }
+.fund-section {
+  padding: 16px 22px; border-bottom: 1px solid var(--border);
+}
+.fund-section:nth-child(odd) { border-right: 1px solid var(--border); }
+.fund-section-title {
+  font-size: 10px; font-weight: 700; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px;
+}
+.fund-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+.fund-row:last-child { border-bottom: none; }
+.fund-row-lbl { color: var(--dim); font-size: 12px; }
+.fund-row-val { font-weight: 700; font-family: var(--mono); font-size: 13px; text-align: right; }
+.fund-row-val.pos { color: var(--green); }
+.fund-row-val.neg { color: var(--red); }
+.fund-chart-section {
+  grid-column: 1 / -1; padding: 16px 22px; border-bottom: 1px solid var(--border);
+}
+.fund-chart-section pre {
+  font-size: 12px; line-height: 1.5; margin: 0; overflow-x: auto;
+}
+.fund-full-footer {
+  padding: 10px 22px; font-size: 11px; color: var(--dim);
+  grid-column: 1 / -1;
+}
+
 /* ── Order panel ── */
 .order-panel {
   margin: 16px 0 8px;
@@ -881,6 +968,131 @@ async def _fundamentals_card(ticker: str) -> str:
         return ""
 
 
+async def _build_fundamentals_html(ticker: str) -> str:
+    """Full-page fundamentals card for the /fundamentals tab."""
+    import asyncio as _aio
+    try:
+        from tools.market_data import get_fundamentals
+        data = await _aio.wait_for(get_fundamentals(ticker), timeout=30)
+    except _aio.TimeoutError:
+        return f'<p class="pos-err">Timed out fetching fundamentals for {ticker}. Try again.</p>'
+    except Exception as exc:
+        return f'<p class="pos-err">Failed to fetch fundamentals: {exc}</p>'
+
+    if "error" in data:
+        return f'<p class="pos-err">No fundamentals data for {ticker}: {data["error"]}</p>'
+
+    def _f(v, fmt=".1f", prefix="", suffix="", none="—"):
+        try:
+            return f"{prefix}{float(v):{fmt}}{suffix}" if v is not None else none
+        except (TypeError, ValueError):
+            return none
+
+    def _signed(v, fmt=".1f", suffix="%"):
+        try:
+            n = float(v)
+            cls = "pos" if n >= 0 else "neg"
+            sign = "+" if n >= 0 else ""
+            return f'<span class="fund-row-val {cls}">{sign}{n:{fmt}}{suffix}</span>'
+        except (TypeError, ValueError):
+            return '<span class="fund-row-val">—</span>'
+
+    def _val(v, fmt=".1f", prefix="", suffix=""):
+        return f'<span class="fund-row-val">{_f(v, fmt, prefix, suffix)}</span>'
+
+    def _row(label: str, val_html: str) -> str:
+        return f'<div class="fund-row"><span class="fund-row-lbl">{label}</span>{val_html}</div>'
+
+    name   = data.get("company_name", ticker)
+    sector = data.get("sector") or ""
+    ind    = data.get("industry") or ""
+    source = data.get("source", "Yahoo Finance")
+    src_url = data.get("source_url", "")
+    src_link = (f'<a href="{src_url}" target="_blank" class="fund-source">{source}</a>'
+                if src_url else f'<span class="fund-source">{source}</span>')
+
+    mcap = data.get("market_cap")
+    mcap_s = (f"${mcap/1e12:.2f}T" if mcap and mcap >= 1e12 else
+              f"${mcap/1e9:.1f}B"  if mcap and mcap >= 1e9  else
+              f"${mcap/1e6:.0f}M"  if mcap else "—")
+
+    tags = "".join(
+        f'<span class="fund-tag">{t}</span>'
+        for t in [sector, ind] if t
+    )
+
+    # ── Valuation section ────────────────────────────────────────────────────
+    val_rows = "".join([
+        _row("Market Cap",   f'<span class="fund-row-val">{mcap_s}</span>'),
+        _row("P/E (TTM)",    _val(data.get("pe_ratio"),    ".1f")),
+        _row("P/E (Fwd)",    _val(data.get("forward_pe"),  ".1f")),
+        _row("EPS (TTM)",    _val(data.get("eps_ttm"),     ".2f", "$")),
+        _row("EPS (Fwd)",    _val(data.get("eps_forward"), ".2f", "$")),
+        _row("Div Yield",    _val(data.get("dividend_yield_pct"), ".2f", suffix="%")),
+    ])
+
+    # ── Profitability section ─────────────────────────────────────────────────
+    prof_rows = "".join([
+        _row("Gross Margin",  _val(data.get("gross_margin_pct"),      ".1f", suffix="%")),
+        _row("Net Margin",    _val(data.get("profit_margin_pct"),     ".1f", suffix="%")),
+        _row("ROE",           _val(data.get("roe_pct"),               ".1f", suffix="%")),
+        _row("D/E Ratio",     _val(data.get("debt_to_equity"),        ".2f")),
+        _row("Rev Growth YoY", _signed(data.get("revenue_growth_yoy_pct"))),
+    ])
+
+    # ── Quarterly revenue chart ───────────────────────────────────────────────
+    qtrs = data.get("quarterly_revenues") or []
+    chart_html = ""
+    if qtrs:
+        max_rev = max((q["revenue_b"] for q in qtrs), default=1) or 1
+        lines = []
+        for q in qtrs:
+            period  = q["period"][:7]   # YYYY-MM
+            rev     = q["revenue_b"]
+            qoq     = q.get("qoq_pct")
+            filled  = round(rev / max_rev * 14)
+            bar     = "█" * filled + "░" * (14 - filled)
+            qoq_s   = (f"  {'+' if qoq >= 0 else ''}{qoq:.1f}% QoQ" if qoq is not None else "")
+            lines.append(f"{period}  {bar}  ${rev:.1f}B{qoq_s}")
+        chart_html = (
+            f'<div class="fund-chart-section">'
+            f'<div class="fund-section-title">Quarterly Revenue</div>'
+            f'<pre>{"chr(10)".join(lines)}</pre>'
+            f'</div>'
+        )
+        # Fix: use actual newline
+        chart_inner = "\n".join(lines)
+        chart_html = (
+            f'<div class="fund-chart-section">'
+            f'<div class="fund-section-title">Quarterly Revenue</div>'
+            f'<pre>{chart_inner}</pre>'
+            f'</div>'
+        )
+
+    html = (
+        f'<div class="fund-full">'
+        f'<div class="fund-full-hdr">'
+        f'<div class="fund-full-ticker">{ticker}</div>'
+        f'<div class="fund-full-name">{name}</div>'
+        f'{"<div class=\"fund-full-tags\">" + tags + "</div>" if tags else ""}'
+        f'</div>'
+        f'<div class="fund-sections">'
+        f'<div class="fund-section">'
+        f'<div class="fund-section-title">Valuation</div>'
+        f'{val_rows}'
+        f'</div>'
+        f'<div class="fund-section">'
+        f'<div class="fund-section-title">Profitability &amp; Health</div>'
+        f'{prof_rows}'
+        f'</div>'
+        f'{chart_html}'
+        f'<div class="fund-full-footer">Source: {src_link}</div>'
+        f'</div>'
+        f'</div>'
+    )
+    return html
+
+
 async def _build_positions_html() -> str:
     import asyncio as _aio
     from datetime import date, datetime
@@ -1091,11 +1303,12 @@ def _page(history: list[dict], active_tab: str = "search",
         '</div>')
 
     _tabs = [
-        ("search",    "/",            "🔍", "Search"),
-        ("positions", "/positions",   "📋", "Positions"),
-        ("ibkr",      "/ibkr",        "⚡", "IBKR"),
-        ("research",  "/ui-research", "🔬", "Research"),
-        ("test",      "/test",        "✅", "Tests"),
+        ("search",       "/",               "🔍", "Search"),
+        ("fundamentals", "/fundamentals",   "🏦", "Fundamentals"),
+        ("positions",    "/positions",      "📋", "Positions"),
+        ("ibkr",         "/ibkr",           "⚡", "IBKR"),
+        ("research",     "/ui-research",    "🔬", "Research"),
+        ("test",         "/test",           "✅", "Tests"),
     ]
     bottom_nav = "".join(
         f'<a href="{url}" class="{"active" if t == active_tab else ""}">'
@@ -1122,11 +1335,12 @@ def _page(history: list[dict], active_tab: str = "search",
       <span class="logo-text">FinAgent</span>
     </a>
     <nav class="nav-links">
-      <a href="/"            class="nav-link {'active' if active_tab=='search'    else ''}">Search</a>
-      <a href="/positions"   class="nav-link {'active' if active_tab=='positions' else ''}">Positions</a>
-      <a href="/ibkr"        class="nav-link {'active' if active_tab=='ibkr'      else ''}">IBKR</a>
-      <a href="/ui-research" class="nav-link {'active' if active_tab=='research'  else ''}">Research</a>
-      <a href="/test"        class="nav-link {'active' if active_tab=='test'       else ''}">Tests</a>
+      <a href="/"             class="nav-link {'active' if active_tab=='search'       else ''}">Search</a>
+      <a href="/fundamentals" class="nav-link {'active' if active_tab=='fundamentals' else ''}">Fundamentals</a>
+      <a href="/positions"    class="nav-link {'active' if active_tab=='positions'    else ''}">Positions</a>
+      <a href="/ibkr"         class="nav-link {'active' if active_tab=='ibkr'        else ''}">IBKR</a>
+      <a href="/ui-research"  class="nav-link {'active' if active_tab=='research'    else ''}">Research</a>
+      <a href="/test"         class="nav-link {'active' if active_tab=='test'        else ''}">Tests</a>
     </nav>
     <div class="theme-toggle">
       <button class="theme-btn" id="t-dark"  onclick="setTheme('dark')"  title="Dark">🌙</button>
