@@ -170,18 +170,92 @@ def valuation_chart(pe:         float | None,
     return _to_div(fig)
 
 
+def profitability_history_chart(quarterly_profitability: list[dict]) -> str:
+    """
+    Multi-line chart: Gross Margin, Operating Margin, Net Margin, ROE
+    plotted quarterly. Margins on left y-axis; ROE on right y-axis when
+    its scale differs significantly from margin values.
+    """
+    if not quarterly_profitability:
+        return ""
+
+    periods = [q["period"][:7] for q in quarterly_profitability]
+
+    metric_cfg = [
+        ("gross_margin_pct",     "Gross Margin",     _BLUE,    "y"),
+        ("operating_margin_pct", "Operating Margin", "#f5c518","y"),
+        ("net_margin_pct",       "Net Margin",       _GREEN,   "y"),
+        ("roe_pct",              "ROE (ann.)",        "#ff8c00","y2"),
+    ]
+
+    traces = []
+    has_y2 = False
+    for key, name, color, yaxis in metric_cfg:
+        vals = [q.get(key) for q in quarterly_profitability]
+        if not any(v is not None for v in vals):
+            continue
+        traces.append(go.Scatter(
+            x=periods, y=vals,
+            name=name, mode="lines+markers",
+            line=dict(color=color, width=2),
+            marker=dict(size=5, color=color),
+            connectgaps=False,
+            yaxis=yaxis,
+            hovertemplate=f"<b>{name}</b>: %{{y:.1f}}%<extra></extra>",
+        ))
+        if yaxis == "y2":
+            has_y2 = True
+
+    if not traces:
+        return ""
+
+    layout_extra = {}
+    if has_y2:
+        layout_extra["yaxis2"] = dict(
+            title="ROE (%)", overlaying="y", side="right",
+            gridcolor="rgba(0,0,0,0)", zeroline=False,
+            tickfont=dict(color="#ff8c00"),
+        )
+
+    fig = go.Figure(traces)
+    layout = {**_LAYOUT, "showlegend": True}
+    fig.update_layout(
+        **layout,
+        title=dict(
+            text="Profitability & Returns — Quarterly",
+            font=dict(size=12, color=_DIM), x=0,
+        ),
+        height=300,
+        legend=dict(
+            orientation="h", y=1.18, x=0,
+            font=dict(size=11),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        yaxis=dict(title="%", **_GRID),
+        xaxis=dict(**_GRID),
+        hovermode="x unified",
+        **layout_extra,
+    )
+    return _to_div(fig)
+
+
 def generate_fundamentals_charts(data: dict) -> dict[str, str]:
     """
     Generate all fundamental charts for a ticker.
     Returns a dict mapping chart name → HTML string.
     Call this from FundamentalsAgent or the web page builder.
     """
-    qtrs = data.get("quarterly_revenues") or []
+    qtrs  = data.get("quarterly_revenues") or []
+    qprof = data.get("quarterly_profitability") or []
     charts: dict[str, str] = {}
 
     rev = revenue_chart(qtrs)
     if rev:
         charts["revenue"] = rev
+
+    prof_line = profitability_history_chart(qprof)
+    if prof_line:
+        charts["profitability_history"] = prof_line
 
     marg = margins_chart(
         gross_margin=data.get("gross_margin_pct"),

@@ -107,15 +107,18 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
     info = stock.info or {}
 
     revenue_yoy: float | None = None
-    quarterly_revenues: list[dict] = []   # [{period, revenue_b, qoq_pct}]
+    quarterly_revenues: list[dict] = []        # [{period, revenue_b, qoq_pct}]
+    quarterly_profitability: list[dict] = []   # [{period, gross_margin_pct, op_margin_pct, net_margin_pct, roe_pct}]
 
     try:
         def _find_revenue_key(index) -> str | None:
-            # Prefer exact "Total Revenue", then "Operating Revenue"; never cost lines
             for want in ("Total Revenue", "Operating Revenue"):
                 if want in index:
                     return want
             return None
+
+        def _series(df, key: str):
+            return df.loc[key].dropna() if df is not None and key in df.index else None
 
         # Annual revenue for YoY
         fin = stock.financials
@@ -128,14 +131,24 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
                     if r1 != 0:
                         revenue_yoy = round((r0 - r1) / abs(r1) * 100, 2)
 
-        # Quarterly revenue — last 6 quarters
+        # Quarterly financials
         qfin = stock.quarterly_financials
+        qbal = stock.quarterly_balance_sheet
         if qfin is not None and not qfin.empty:
             qrev_key = _find_revenue_key(qfin.index)
             if qrev_key:
-                qrevs = qfin.loc[qrev_key].dropna().sort_index()
-                vals = [(str(dt.date()), float(v)) for dt, v in qrevs.items()]
-                vals = vals[-6:]   # keep most recent 6
+                rev_s  = _series(qfin, qrev_key)
+                gp_s   = _series(qfin, "Gross Profit")
+                oi_s   = _series(qfin, "Operating Income")
+                ni_s   = _series(qfin, "Net Income")
+                eq_s   = _series(qbal, "Common Stock Equity")
+                if eq_s is None:
+                    eq_s = _series(qbal, "Stockholders Equity")
+
+                qrevs = rev_s.sort_index()
+                vals  = [(str(dt.date()), float(v)) for dt, v in qrevs.items()]
+                vals  = vals[-6:]
+
                 for i, (period, rev) in enumerate(vals):
                     qoq = None
                     if i > 0:
@@ -147,6 +160,34 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
                         "revenue_b": round(rev / 1e9, 2),
                         "qoq_pct": qoq,
                     })
+
+                # Quarterly profitability metrics
+                for period, rev in vals:
+                    if rev == 0:
+                        continue
+                    import pandas as _pd
+                    dt = _pd.Timestamp(period)
+                    entry: dict = {"period": period}
+
+                    def _margin(series, dt, rev):
+                        if series is None or dt not in series.index:
+                            return None
+                        v = series[dt]
+                        return round(float(v) / rev * 100, 2) if v and rev else None
+
+                    entry["gross_margin_pct"]     = _margin(gp_s, dt, rev)
+                    entry["operating_margin_pct"] = _margin(oi_s, dt, rev)
+                    entry["net_margin_pct"]        = _margin(ni_s, dt, rev)
+
+                    # ROE = annualised quarterly net income / equity
+                    if eq_s is not None and ni_s is not None and dt in eq_s.index and dt in ni_s.index:
+                        eq = float(eq_s[dt] or 0)
+                        ni = float(ni_s[dt] or 0)
+                        if eq and eq > 0:
+                            entry["roe_pct"] = round(ni * 4 / eq * 100, 2)
+
+                    if len(entry) > 1:
+                        quarterly_profitability.append(entry)
     except Exception:
         pass
 
@@ -161,6 +202,7 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
         "eps_forward": _safe(info.get("forwardEps")),
         "revenue_growth_yoy_pct": revenue_yoy,
         "quarterly_revenues": quarterly_revenues,
+        "quarterly_profitability": quarterly_profitability,
         # yfinance debtToEquity is already ×100 (e.g. 79.55 = 0.7955 ratio)
         "debt_to_equity": _safe((info.get("debtToEquity") or 0) / 100),
         "profit_margin_pct": _safe(

@@ -1060,13 +1060,11 @@ async def _build_fundamentals_html(ticker: str) -> str:
     from tools.charts import generate_fundamentals_charts
     charts = generate_fundamentals_charts(data)
 
-    rev_section = ""
-    if charts.get("revenue"):
-        rev_section = (
-            f'<div class="fund-charts-row">'
-            f'{charts["revenue"]}'
-            f'</div>'
-        )
+    def _chart_row(html: str) -> str:
+        return f'<div class="fund-charts-row">{html}</div>' if html else ""
+
+    rev_section  = _chart_row(charts.get("revenue", ""))
+    prof_section = _chart_row(charts.get("profitability_history", ""))
 
     side_charts = ""
     margin_html = charts.get("margins", "")
@@ -1096,6 +1094,7 @@ async def _build_fundamentals_html(ticker: str) -> str:
         f'{prof_rows}'
         f'</div>'
         f'{rev_section}'
+        f'{prof_section}'
         f'{side_charts}'
         f'<div class="fund-full-footer">Source: {src_link}</div>'
         f'</div>'
