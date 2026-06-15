@@ -1,12 +1,17 @@
 """
-Market data wrapper — yfinance (primary) + Polygon.io (real-time, when key is set).
+Market data wrapper — yfinance + DoltHub (primary for options chains) + Polygon.io (real-time).
 
-All public functions are async; blocking yfinance calls are offloaded to a thread
-pool via asyncio.to_thread so the event loop is never blocked.
+Options chain priority:
+  1. IB Gateway (real-time via ib_insync)
+  2. DoltHub post-no-preference/options  (EOD, full Greeks, broader expirations)
+  3. Yahoo Finance (fallback)
+
+All public functions are async; blocking calls are offloaded to asyncio.to_thread.
 """
 
 import asyncio
 import logging
+import urllib.parse
 from typing import Any
 
 import numpy as np
@@ -412,24 +417,137 @@ async def get_options_data(ticker: str) -> dict:
         return {"error": str(exc)}
 
 
+_DOLT_API = "https://www.dolthub.com/api/v1alpha1/post-no-preference/options/master"
+
+
+def _recent_trading_days(n: int = 5) -> list[str]:
+    """Return the last n weekdays as YYYY-MM-DD strings, newest first."""
+    from datetime import date, timedelta
+    d, out = date.today(), []
+    while len(out) < n:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:   # Mon–Fri
+            out.append(str(d))
+    return out
+
+
+def _dolt_query_sync(q: str, timeout: int = 20) -> dict | None:
+    """Run a DoltHub SQL query synchronously via requests. Returns parsed JSON or None."""
+    import requests as _req
+    url = f"{_DOLT_API}?q={urllib.parse.quote(q)}"
+    try:
+        r = _req.get(url, timeout=timeout)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception as exc:
+        logger.debug("DoltHub HTTP error: %s", exc)
+        return None
+
+
+async def _fetch_dolt_chains(ticker: str, current_price: float | None) -> list[dict] | None:
+    """
+    Query DoltHub post-no-preference/options for the most recent EOD chain.
+    Uses the last few trading days as candidate dates (avoids slow MAX(date) scan).
+    Returns a list of {expiration, calls, puts} dicts, or None on failure.
+    """
+    from collections import defaultdict
+
+    sym = ticker.upper().replace("'", "")
+    lo = (current_price * 0.85) if current_price else None
+    hi = (current_price * 1.15) if current_price else None
+
+    rows: list[dict] = []
+    for date_str in _recent_trading_days(5):
+        q = (
+            f"SELECT expiration, strike, call_put, bid, ask, vol, delta, gamma, theta, vega "
+            f"FROM option_chain "
+            f"WHERE act_symbol = '{sym}' AND date = '{date_str}' "
+            f"ORDER BY expiration, call_put, strike LIMIT 3000"
+        )
+        payload = await asyncio.to_thread(_dolt_query_sync, q)
+        if payload and payload.get("query_execution_status") == "Success":
+            rows = payload.get("rows") or []
+            if rows:
+                logger.info("DoltHub: found %s data for %s (%d rows)", date_str, ticker, len(rows))
+                break
+            logger.debug("DoltHub: no data for %s on %s, trying earlier date", ticker, date_str)
+
+    if not rows:
+        logger.debug("DoltHub: no EOD data found for %s", ticker)
+        return None
+
+    by_exp: dict[str, dict[str, list]] = defaultdict(lambda: {"calls": [], "puts": []})
+    for row in rows:
+        strike = float(row["strike"] or 0)
+        if lo is not None and not (lo <= strike <= hi):
+            continue
+        entry = {
+            "strike":            strike,
+            "bid":               float(row["bid"])   if row.get("bid")   else None,
+            "ask":               float(row["ask"])   if row.get("ask")   else None,
+            "impliedVolatility": float(row["vol"])   if row.get("vol")   else None,
+            "delta":             float(row["delta"]) if row.get("delta") else None,
+            "gamma":             float(row["gamma"]) if row.get("gamma") else None,
+            "theta":             float(row["theta"]) if row.get("theta") else None,
+            "vega":              float(row["vega"])  if row.get("vega")  else None,
+        }
+        cp = (row.get("call_put") or "").lower()
+        if cp == "call":
+            by_exp[row["expiration"]]["calls"].append(entry)
+        elif cp == "put":
+            by_exp[row["expiration"]]["puts"].append(entry)
+
+    if not by_exp:
+        logger.debug("DoltHub: all strikes outside ±15%% range for %s", ticker)
+        return None
+
+    chains = [
+        {"expiration": exp, "calls": v["calls"], "puts": v["puts"]}
+        for exp, v in sorted(by_exp.items())
+    ]
+    logger.info("DoltHub: %d expirations for %s", len(chains), ticker)
+    return chains
+
+
 async def get_options_chain(ticker: str) -> dict:
-    """Returns current price, expirations, and options chain (calls+puts) for first 4 expirations.
-    Tries IB Gateway (ib_insync) first; falls back to yfinance if not connected or market closed."""
+    """
+    Returns current price, expirations, and options chain (calls+puts).
+    Priority: IB Gateway → DoltHub (EOD, full Greeks) → Yahoo Finance.
+    """
     try:
         from tools.ibkr_options import get_options_chain_ibkr
         ibkr_data = await get_options_chain_ibkr(ticker)
-        if "error" not in ibkr_data:
+        chains_ok = ibkr_data.get("chains") and any(
+            (opt.get("bid") or 0) > 0 or (opt.get("ask") or 0) > 0
+            for ch in ibkr_data["chains"]
+            for opt in ch.get("calls", []) + ch.get("puts", [])
+        )
+        if "error" not in ibkr_data and chains_ok:
             logger.info("get_options_chain(%s): using IB Gateway data", ticker)
             ibkr_data["source"] = "IB Gateway"
             return ibkr_data
-        logger.info("IBKR options unavailable (%s) — falling back to yfinance", ibkr_data["error"])
+        reason = ibkr_data.get("error") or ("no live quotes" if ibkr_data.get("chains") else "empty chains")
+        logger.info("IBKR options unavailable (%s) — trying DoltHub", reason)
     except Exception as exc:
         logger.debug("IBKR options import/call failed for %s: %s", ticker, exc)
 
+    # Fetch price/HV/company from yfinance regardless (DoltHub has no price data)
     try:
-        data = await asyncio.to_thread(_fetch_options_chain_sync, ticker)
-        data["source"] = "Yahoo Finance"
-        return data
+        yf_data = await asyncio.to_thread(_fetch_options_chain_sync, ticker)
     except Exception as exc:
-        logger.error("get_options_chain(%s) failed: %s", ticker, exc)
+        logger.error("get_options_chain(%s) yfinance failed: %s", ticker, exc)
         return {"error": str(exc)}
+
+    # Overlay DoltHub chains (richer expirations + full Greeks)
+    dolt_chains = await _fetch_dolt_chains(ticker, yf_data.get("current_price"))
+    if dolt_chains:
+        yf_data["chains"] = dolt_chains
+        yf_data["available_expirations"] = [c["expiration"] for c in dolt_chains]
+        yf_data["source"] = "DoltHub"
+        logger.info("get_options_chain(%s): using DoltHub chains", ticker)
+    else:
+        yf_data["source"] = "Yahoo Finance"
+        logger.info("get_options_chain(%s): DoltHub unavailable, using yfinance chains", ticker)
+
+    return yf_data
