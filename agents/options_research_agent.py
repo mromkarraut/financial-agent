@@ -655,11 +655,20 @@ class OptionsResearchAgent(BaseAgent):
     async def run(self, input: dict) -> AgentResult:
         ticker:  str = input.get("ticker", "").strip().upper()
         outlook: str = input.get("outlook", "neutral").lower()
-        term:    str = input.get("term", "short").lower()   # "short" ≤45d  "long" >21d
+        term:    str = input.get("term", "short").lower()
         chat_id: str = str(input.get("chat_id", ""))
         if outlook not in ("bullish", "bearish", "neutral"):
             outlook = "neutral"
         if term not in ("short", "long"):
+            term = "short"
+        try:
+            dte_target = int(input.get("dte_target") or 0)
+        except (ValueError, TypeError):
+            dte_target = 0
+        # Infer term from dte_target when provided
+        if dte_target > 45:
+            term = "long"
+        elif dte_target > 0:
             term = "short"
 
         if not ticker:
@@ -681,12 +690,13 @@ class OptionsResearchAgent(BaseAgent):
 
             # Filter chains by term horizon — always exclude ≤4 DTE (too close to expiry)
             viable = [c for c in chains if _dte(c["expiration"]) > 4]
-            if term == "short":
-                # Prefer 5–45 DTE; fall back to all viable if none in range
+            if dte_target > 0:
+                # Pick up to 3 expirations closest to the requested DTE target
+                chains = sorted(viable, key=lambda c: abs(_dte(c["expiration"]) - dte_target))[:3]
+            elif term == "short":
                 short_chains = [c for c in viable if _dte(c["expiration"]) <= 45]
                 chains = (short_chains or viable or chains)[:3]
             else:
-                # Prefer >21 DTE (furthest); fall back to all viable
                 long_chains = [c for c in viable if _dte(c["expiration"]) > 21]
                 chains = (long_chains or viable or chains)[-3:]
 
@@ -718,7 +728,10 @@ class OptionsResearchAgent(BaseAgent):
             # Header
             iv_str  = f"{atm_iv*100:.1f}%" if atm_iv else "—"
             ivr_tag = ("🔴 Rich" if ivr >= 50 else "🟢 Cheap") if ivr != 50 else ""
-            term_label   = "📅 Short Term" if term == "short" else "📆 Long Term"
+            if dte_target > 0:
+                term_label = f"📅 {dte_target}d" if term == "short" else f"📆 {dte_target}d"
+            else:
+                term_label = "📅 Short Term" if term == "short" else "📆 Long Term"
             source_label = mkt.get("source", "Yahoo Finance")
             parts.append(
                 f"<b>{name} ({ticker}) — Options Research  {term_label}</b>\n"

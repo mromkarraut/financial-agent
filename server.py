@@ -112,9 +112,10 @@ async def index() -> HTMLResponse:
 
 @app.post("/search", response_class=HTMLResponse)
 async def search(
-    ticker:  str = Form(...),
-    outlook: str = Form("neutral"),
-    term:    str = Form("short"),
+    ticker:     str = Form(...),
+    outlook:    str = Form("neutral"),
+    term:       str = Form("short"),
+    dte_target: str = Form("30"),
 ) -> HTMLResponse:
     ticker = ticker.strip().upper()
     if not ticker:
@@ -122,7 +123,8 @@ async def search(
 
     agent = OptionsResearchAgent()
     result, fund_card = await asyncio.gather(
-        agent.run({"ticker": ticker, "outlook": outlook, "term": term, "chat_id": "web"}),
+        agent.run({"ticker": ticker, "outlook": outlook, "term": term,
+                   "dte_target": dte_target, "chat_id": "web"}),
         _fundamentals_card(ticker),
     )
     history = await _get_history()
@@ -534,12 +536,27 @@ aside {
 body.light .star-row { background: rgba(184,120,0,0.1); }
 body.light .atm-row  { background: rgba(0,80,208,0.07); }
 
-/* ── Long term button variant ── */
-.btn-long {
-  background: var(--bg3) !important; color: var(--text) !important;
-  border: 1.5px solid var(--border);
+/* ── Term selector groups (Short / Long) ── */
+.term-group {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg2); border: 1.5px solid var(--green);
+  border-radius: 8px; padding: 6px 10px;
+  transition: border-color var(--ease), opacity var(--ease);
+  white-space: nowrap; cursor: pointer;
 }
-.btn-long:hover { background: var(--bg2) !important; border-color: var(--blue); }
+.term-group.term-off { border-color: var(--border); opacity: 0.55; }
+.term-group input[type="radio"] {
+  accent-color: var(--green); width: 14px; height: 14px;
+  cursor: pointer; flex-shrink: 0; margin: 0;
+}
+.term-group label { font-size: 13px; font-weight: 600; cursor: pointer; }
+.term-group.term-off label { color: var(--dim); }
+.term-sel {
+  background: transparent; border: none; color: var(--text);
+  font-size: 13px; font-weight: 500; padding: 0 2px;
+  cursor: pointer; outline: none;
+}
+.term-group.term-off .term-sel { color: var(--dim); }
 
 /* ── Fundamentals card ── */
 .fund-card {
@@ -758,6 +775,7 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
   .search-form { flex-wrap: wrap; gap: 8px; width: 100%; }
   .ticker-wrap { flex: 1 1 100px; min-width: 0; }
   .search-bar select { flex: 1 1 120px; min-width: 0; }
+  .term-group { flex: 1 1 auto; }
   .btn { flex: 0 0 auto; }
 
   #results { padding: 14px; padding-bottom: 72px; }
@@ -1123,7 +1141,7 @@ def _page(history: list[dict], active_tab: str = "search",
     </aside>
 
     <div class="content">
-      {'<div class="search-bar"><form class="search-form" id="search-form" hx-post="/search" hx-target="#results" hx-swap="innerHTML" hx-indicator="#spinner"><div class="ticker-wrap"><input name="ticker" type="text" placeholder="AAPL" maxlength="6" autocomplete="off" autocapitalize="characters" autofocus /></div><select name="outlook"><option value="bullish">📈 Bullish</option><option value="bearish">📉 Bearish</option><option value="neutral">↔️ Neutral</option></select><input type="hidden" name="term" id="term-input" value="short"><button class="btn" type="submit" onclick="setTerm(\'short\')">📅 Short Term</button><button class="btn btn-long" type="submit" onclick="setTerm(\'long\')">📆 Long Term</button><div id="spinner" class="htmx-indicator">Fetching…</div></form><script>function setTerm(t){document.getElementById("term-input").value=t;}</script></div>' if show_search else ''}
+      {'<div class="search-bar"><form class="search-form" id="search-form" hx-post="/search" hx-target="#results" hx-swap="innerHTML" hx-indicator="#spinner"><div class="ticker-wrap"><input name="ticker" type="text" placeholder="AAPL" maxlength="6" autocomplete="off" autocapitalize="characters" autofocus /></div><select name="outlook"><option value="bullish">📈 Bullish</option><option value="bearish">📉 Bearish</option><option value="neutral">↔️ Neutral</option></select><div class="term-group" id="tg-short"><input type="radio" name="trm" id="tr-short" checked onchange="onTerm(\'short\')"><label for="tr-short">📅 Short-term</label><select class="term-sel" id="sel-short" onchange="onDte(\'short\')"><option value="7">7d</option><option value="14">14d</option><option value="21">21d</option><option value="30" selected>30d</option><option value="45">45d</option></select></div><div class="term-group term-off" id="tg-long"><input type="radio" name="trm" id="tr-long" onchange="onTerm(\'long\')"><label for="tr-long">📆 Long-term</label><select class="term-sel" id="sel-long" disabled onchange="onDte(\'long\')"><option value="60">60d</option><option value="90" selected>90d</option><option value="120">120d</option><option value="180">180d</option><option value="365">1yr</option></select></div><input type="hidden" name="term" id="term-val" value="short"><input type="hidden" name="dte_target" id="dte-val" value="30"><button class="btn" type="submit">Research</button><div id="spinner" class="htmx-indicator">Fetching…</div></form><script>function onTerm(t){var s=t===\'short\';document.getElementById(\'term-val\').value=t;document.getElementById(\'tg-short\').classList.toggle(\'term-off\',!s);document.getElementById(\'tg-long\').classList.toggle(\'term-off\',s);document.getElementById(\'sel-short\').disabled=!s;document.getElementById(\'sel-long\').disabled=s;onDte(t);}function onDte(t){var sel=document.getElementById(t===\'short\'?\'sel-short\':\'sel-long\');document.getElementById(\'dte-val\').value=sel.value;}</script></div>' if show_search else ''}
 
       <div id="results">{search_content}</div>
     </div>
