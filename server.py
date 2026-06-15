@@ -224,10 +224,25 @@ async def api_cancel_order(order_id: str = Form(...)) -> Response:
     return HTMLResponse(f'<span class="cancel-result {cls}">{result}</span>')
 
 
+@app.post("/api/cancel-all-orders", response_class=HTMLResponse)
+async def api_cancel_all_orders() -> Response:
+    from mcp_servers.ibkr_orders.server import cancel_all_open_orders
+    try:
+        result = await cancel_all_open_orders()
+        ok  = "failed" not in result.lower() and "not connected" not in result.lower()
+        cls = "cancel-ok" if ok else "cancel-err"
+    except Exception as exc:
+        result = f"Error: {exc}"
+        cls    = "cancel-err"
+        ok     = False
+    headers = {"HX-Trigger": "positionsRefresh"} if ok else {}
+    return HTMLResponse(f'<span class="cancel-result {cls}">{result}</span>', headers=headers)
+
+
 @app.get("/positions", response_class=HTMLResponse)
 async def positions_page() -> HTMLResponse:
     history = await _get_history()
-    body = '<div id="positions-content" hx-get="/api/positions-fragment" hx-trigger="load, every 60s" hx-swap="innerHTML"><div class="placeholder"><div class="icon">⏳</div><p>Loading positions…</p></div></div>'
+    body = '<div id="positions-content" hx-get="/api/positions-fragment" hx-trigger="load, every 60s, positionsRefresh from:body" hx-swap="innerHTML"><div class="placeholder"><div class="icon">⏳</div><p>Loading positions…</p></div></div>'
     return HTMLResponse(_page(history, active_tab="positions", body_override=body, show_search=False))
 
 
@@ -810,12 +825,26 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
 .cancel-result   { font-size: 11px; font-weight: 600; }
 .cancel-ok  { color: var(--green); }
 .cancel-err { color: var(--red); }
+.pos-hdr-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 12px;
+}
 .pos-toggle {
-  margin-left: auto; display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 6px;
   font-size: 12px; font-weight: 500; color: var(--dim);
   cursor: pointer; text-transform: none; letter-spacing: 0;
 }
 .pos-toggle input { accent-color: var(--blue); cursor: pointer; }
+.btn-cancel-all {
+  background: rgba(255,80,0,0.12); border: 1px solid var(--red);
+  border-radius: 6px; color: var(--red); font-size: 11px;
+  font-weight: 700; padding: 3px 10px; cursor: pointer;
+  transition: all var(--ease); white-space: nowrap;
+}
+.btn-cancel-all:hover { background: var(--red); color: #fff; }
+.htmx-request .btn-cancel-all {
+  opacity: 0.45; pointer-events: none; cursor: default;
+  border-color: var(--dim); color: var(--dim); background: none;
+}
 
 /* DTE badges */
 .dte-badge {
@@ -1267,12 +1296,25 @@ async def _build_positions_html() -> str:
                 f'</tr>'
             )
 
+        cancel_all_btn = (
+            f'<form hx-post="/api/cancel-all-orders" hx-target="#cancel-all-result" hx-swap="innerHTML"'
+            f' style="display:inline">'
+            f'<button type="submit" class="btn-cancel-all">'
+            f'<span class="cancel-idle">✕ Cancel All</span>'
+            f'<span class="cancel-busy">Cancelling…</span>'
+            f'</button>'
+            f'</form>'
+            f'<span id="cancel-all-result"></span>'
+        )
         strat_html = (
             f'<div class="pos-section-hdr">Strategy History'
+            f'<div class="pos-hdr-actions">'
+            f'{cancel_all_btn}'
             f'<label class="pos-toggle">'
             f'<input type="checkbox" id="show-cancelled" onchange="toggleCancelled(this.checked)">'
             f'Show cancelled'
             f'</label>'
+            f'</div>'
             f'</div>'
             f'<div class="pos-table-wrap">'
             f'<table class="pos-table" id="pos-table">'

@@ -31,6 +31,8 @@ Outlook = Literal["bullish", "bearish", "neutral"]
 
 NUMS = ["①", "②", "③", "④", "⑤"]
 
+MIN_SPREAD_WIDTH = 4.0  # hard minimum spread width in dollars — no spread narrower than this is ever suggested
+
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -184,14 +186,99 @@ def _dte_rank_key(s: dict, dte_target: int) -> tuple:
     return (dist > tol, dist, -s["pop"])   # (out-of-tolerance last, closer first, higher POP first)
 
 
+def _make_single_leg(
+    num: str, name: str, kind: str,
+    strike: float, price: float,
+    S: float, T: float, sigma: float,
+    exp: str, dte: int,
+) -> dict:
+    """Build a Long Call or Long Put strategy dict."""
+    if price <= 0:
+        return {}
+    is_call   = kind == "long_call"
+    max_loss  = round(price * 100)
+    delta     = bs_delta(S, strike, T, sigma, is_call)
+    pop       = round(abs(delta), 3)   # delta ≈ P(expires ITM)
+    if is_call:
+        breakeven  = round(strike + price, 2)
+        max_profit = round(price * 3 * 100)    # display cap: 3× premium (realistic profit target)
+    else:
+        breakeven  = round(strike - price, 2)
+        max_profit = round(price * 3 * 100)    # display cap: 3× premium
+    if max_profit <= 0 or max_loss <= 0:
+        return {}
+    roc       = round(max_profit / max_loss * 100, 1)
+    score     = round(pop * (roc / 100), 4)
+    pos_theta = round(bs_theta_daily(S, strike, T, sigma, is_call) * 100, 2)
+    return {
+        "num": num, "name": name, "kind": kind,
+        "exp": exp, "dte": dte,
+        "buy_strike": strike, "sell_strike": 0.0,
+        "buy_price": price,   "sell_price": 0.0,
+        "net": -round(price, 2), "is_credit": False,
+        "max_profit": max_profit, "max_loss": max_loss,
+        "breakeven": breakeven,
+        "pop": pop, "p50": p50(pop),
+        "roc": roc, "score": score,
+        "pos_delta": round(delta, 3), "pos_theta": pos_theta,
+        "spread": 0.0, "sigma": sigma,
+    }
+
+
+def _make_straddle(
+    num: str, name: str, kind: str,
+    call_strike: float, put_strike: float,
+    call_price: float, put_price: float,
+    S: float, T: float, sigma: float,
+    exp: str, dte: int,
+) -> dict:
+    """Build a Long Straddle or Long Strangle strategy dict."""
+    total = round(call_price + put_price, 2)
+    if total <= 0:
+        return {}
+    max_loss  = round(total * 100)
+    upper_be  = round(call_strike + total, 2)
+    lower_be  = round(put_strike  - total, 2)
+    # POP = P(stock > upper_be) + P(stock < lower_be)
+    pop_up    = bs_delta(S, upper_be, T, sigma, is_call=True)
+    pop_dn    = 1.0 - bs_delta(S, lower_be, T, sigma, is_call=True)
+    pop       = round(min(0.99, pop_up + pop_dn), 3)
+    # Max profit display estimate (for strangle: distance between strikes + total debit)
+    spread_w  = abs(call_strike - put_strike)
+    max_profit = round((spread_w + total) * 100) if spread_w > 0 else round(S * 0.15 * 100)
+    if max_profit <= 0:
+        return {}
+    roc       = round(max_profit / max_loss * 100, 1)
+    score     = round(pop * (roc / 100), 4)
+    call_d    = bs_delta(S, call_strike, T, sigma, True)
+    put_d     = bs_delta(S, put_strike,  T, sigma, False)
+    call_t    = bs_theta_daily(S, call_strike, T, sigma, True)
+    put_t     = bs_theta_daily(S, put_strike,  T, sigma, False)
+    pos_theta = round((call_t + put_t) * 100, 2)
+    return {
+        "num": num, "name": name, "kind": kind,
+        "exp": exp, "dte": dte,
+        "buy_strike": call_strike, "sell_strike": put_strike,
+        "buy_price": call_price,   "sell_price": put_price,
+        "net": -total, "is_credit": False,
+        "max_profit": max_profit, "max_loss": max_loss,
+        "breakeven": upper_be, "breakeven_lower": lower_be,
+        "pop": pop, "p50": p50(pop),
+        "roc": roc, "score": score,
+        "pos_delta": round(call_d + put_d, 3), "pos_theta": pos_theta,
+        "spread": round(call_strike - put_strike, 2), "sigma": sigma,
+        "call_strike": call_strike, "put_strike": put_strike,
+        "total_debit": total,
+    }
+
+
 def _generate_strategies(outlook: str, chains: list[dict], price: float,
                           dte_target: int = 0) -> list[dict]:
     """
-    Generate vertical spread candidates only.
-    A vertical spread: same expiration, same option type (all calls or all puts),
-    two different strikes — one bought, one sold.
-    When dte_target > 0, strategies whose expiration is closest to that target
-    are ranked first within each credit/debit group (guardrail).
+    Generate debit-only strategy candidates from IBKR's approved list:
+    Long Call, Long Put, Long Call Spread, Long Put Spread,
+    Long Straddle, Long Strangle.
+    All are debit (you pay to enter). No credit spreads.
     """
     candidates: list[dict] = []
 
@@ -215,18 +302,16 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float,
         s_below = [s for s in all_s if s < atm]
 
         def _sigma(row: dict) -> float:
-            """Use the option's own IV for accurate per-leg Greeks."""
             iv = (row or {}).get("impliedVolatility") or 0.0
             return iv if iv > 0.01 else 0.30
 
         def _add_vertical(name: str, kind: str,
                           b_strike: float, s_strike: float,
                           b_row: dict, s_row: dict) -> None:
-            # Enforce vertical spread: same exp (guaranteed by chain loop),
-            # same type (enforced by kind), different strikes, valid prices.
             if not _is_vertical(b_strike, s_strike, b_row, s_row, exp):
                 return
-            # Use average IV of the two legs for Greeks (more accurate than ATM-only)
+            if abs(b_strike - s_strike) < MIN_SPREAD_WIDTH:
+                return
             leg_sigma = (_sigma(b_row) + _sigma(s_row)) / 2
             s = _make_strategy(
                 num="", name=name, kind=kind,
@@ -238,42 +323,32 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float,
             if s:
                 candidates.append(s)
 
+        atm_call_row = calls_m.get(atm, {})
+        atm_put_row  = puts_m.get(atm, {})
+
+        # ── Long Call Spread — debit (bullish / neutral) ────────────────────────
         if outlook in ("bullish", "neutral"):
-            # Vertical call debit spreads (buy lower call, sell higher call)
-            for i, otm in enumerate(s_above[:2]):
+            valid_above = [s for s in s_above if (s - atm) >= MIN_SPREAD_WIDTH]
+            for i, otm in enumerate(valid_above[:2]):
                 width = "Narrow" if i == 0 else "Wide"
-                _add_vertical(f"Bull Call Spread ({width})", "bull_call",
-                              atm, otm, calls_m.get(atm, {}), calls_m.get(otm, {}))
-            # Vertical put credit spreads (sell higher put, buy lower put)
-            for i, otm in enumerate(s_below[-2:][::-1]):
-                width = "Narrow" if i == 0 else "Wide"
-                _add_vertical(f"Bull Put Spread ({width})", "bull_put",
-                              otm, atm, puts_m.get(otm, {}), puts_m.get(atm, {}))
+                _add_vertical(f"Long Call Spread ({width})", "bull_call",
+                              atm, otm, atm_call_row, calls_m.get(otm, {}))
 
-        elif outlook == "bearish":
-            # Vertical call credit spreads (sell lower call, buy higher call)
-            for i, otm in enumerate(s_above[:2]):
+        # ── Long Put Spread — debit (bearish / neutral) ─────────────────────────
+        if outlook in ("bearish", "neutral"):
+            valid_below = [s for s in s_below if (atm - s) >= MIN_SPREAD_WIDTH]
+            for i, otm in enumerate(valid_below[-2:][::-1]):
                 width = "Narrow" if i == 0 else "Wide"
-                _add_vertical(f"Bear Call Spread ({width})", "bear_call",
-                              otm, atm, calls_m.get(otm, {}), calls_m.get(atm, {}))
-            # Vertical put debit spreads (buy higher put, sell lower put)
-            for i, otm in enumerate(s_below[-2:][::-1]):
-                width = "Narrow" if i == 0 else "Wide"
-                _add_vertical(f"Bear Put Spread ({width})", "bear_put",
-                              atm, otm, puts_m.get(atm, {}), puts_m.get(otm, {}))
+                _add_vertical(f"Long Put Spread ({width})", "bear_put",
+                              atm, otm, atm_put_row, puts_m.get(otm, {}))
 
-    # Rank each type by POP (tastytrade primary metric), then blend.
-    # When dte_target is set, DTE proximity is the primary sort key within
-    # each group so the target expiration surfaces to the top (guardrail).
     if dte_target > 0:
         rank = lambda s: _dte_rank_key(s, dte_target)   # noqa: E731
     else:
         rank = lambda s: -s["pop"]                        # noqa: E731
 
-    credits = sorted([c for c in candidates if     c["is_credit"]], key=rank)
-    debits  = sorted([c for c in candidates if not c["is_credit"]], key=rank)
-    candidates = (credits[:3] + debits[:2]) or (credits[:5]) or (debits[:5])
-    top5 = candidates[:5]
+    top5 = sorted(candidates, key=rank)[:5]
+
     for i, s in enumerate(top5):
         s["num"] = NUMS[i]
     return top5
@@ -390,9 +465,20 @@ def _fmt_comparison(strategies: list[dict], best_num: str) -> str:
     ]
 
     for s in strategies:
-        right   = "C" if "call" in s["kind"] else "P"
-        strikes = f"${s['sell_strike']:.0f}/${s['buy_strike']:.0f}{right}"
-        net_str = f"+${s['max_profit']}" if s["is_credit"] else f"-${s['max_loss']}"
+        kind = s["kind"]
+        if kind == "long_call":
+            strikes = f"${s['buy_strike']:.0f}C"
+        elif kind == "long_put":
+            strikes = f"${s['buy_strike']:.0f}P"
+        elif kind == "long_straddle":
+            strikes = f"${s['buy_strike']:.0f}C+P"
+        elif kind == "long_strangle":
+            strikes = f"${s['buy_strike']:.0f}C/${s['sell_strike']:.0f}P"
+        elif "call" in kind:
+            strikes = f"${s['sell_strike']:.0f}/${s['buy_strike']:.0f}C"
+        else:
+            strikes = f"${s['buy_strike']:.0f}/${s['sell_strike']:.0f}P"
+        net_str = f"-${s['max_loss']}"   # all strategies are debit
         star    = "⭐" if s["num"] == best_num else " "
         roc_str = f"{s['roc']:>3.0f}%{star}"
 
@@ -412,36 +498,8 @@ def _fmt_comparison(strategies: list[dict], best_num: str) -> str:
 
 
 def _fmt_detail_card(s: dict, price: float) -> str:
-    is_call   = "call" in s["kind"]
-    opt_word  = "Call" if is_call else "Put"
-    net_label = "Net credit" if s["is_credit"] else "Net debit"
-    net_sign  = "+" if s["is_credit"] else "-"
-    per_share = f"${abs(s['net']):.2f}"
-    per_cont  = f"${abs(int(s['net'] * 100))}"
-
-    sell_leg = f"Sell a {opt_word} at <b>${s['sell_strike']:.0f}</b>"
-    buy_leg  = f"Buy a {opt_word} at <b>${s['buy_strike']:.0f}</b>"
-
-    # Narrative broken into 3 separate lines, one idea each
-    if s["kind"] == "bear_call":
-        n1 = f"You collect {per_share}/share ({per_cont}/contract) upfront by selling this spread."
-        n2 = f"You keep the full premium if the stock stays <b>below ${s['sell_strike']:.0f}</b> at expiration."
-        n3 = f"Losses start above ${s['sell_strike']:.0f} and are <b>capped at ${s['max_loss']}</b> above ${s['buy_strike']:.0f}."
-    elif s["kind"] == "bull_put":
-        n1 = f"You collect {per_share}/share ({per_cont}/contract) upfront by selling this spread."
-        n2 = f"You keep the full premium if the stock stays <b>above ${s['sell_strike']:.0f}</b> at expiration."
-        n3 = f"Losses start below ${s['sell_strike']:.0f} and are <b>capped at ${s['max_loss']}</b> below ${s['buy_strike']:.0f}."
-    elif s["kind"] == "bear_put":
-        n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to profit from a decline."
-        n2 = f"The trade becomes profitable if the stock falls <b>below ${s['breakeven']}</b> at expiration."
-        n3 = f"Maximum gain of <b>${s['max_profit']}</b> is locked in below ${s['sell_strike']:.0f}."
-    else:  # bull_call
-        n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to profit from a rise."
-        n2 = f"The trade becomes profitable if the stock rises <b>above ${s['breakeven']}</b> at expiration."
-        n3 = f"Maximum gain of <b>${s['max_profit']}</b> is locked in above ${s['sell_strike']:.0f}."
-
-    theta_str = f"{'+' if s['pos_theta'] >= 0 else ''}${s['pos_theta']:.2f}"
-    col = 16  # left-column width
+    kind      = s["kind"]
+    col       = 16
 
     def row(label: str, value: str) -> str:
         return f"{label:<{col}}│  {value}\n"
@@ -449,103 +507,221 @@ def _fmt_detail_card(s: dict, price: float) -> str:
     def divider() -> str:
         return f"{'─' * col}┼{'─' * 20}\n"
 
+    theta_str = f"{'+' if s['pos_theta'] >= 0 else ''}${s['pos_theta']:.2f}"
+    per_share = f"${abs(s['net']):.2f}"
+    per_cont  = f"${abs(int(s['net'] * 100))}"
+
+    # ── Single-leg: Long Call / Long Put ──────────────────────────────────────
+    if kind in ("long_call", "long_put"):
+        is_call  = kind == "long_call"
+        opt_word = "Call" if is_call else "Put"
+        strike   = s["buy_strike"]
+        be       = s["breakeven"]
+        ml       = s["max_loss"]
+        mp       = s["max_profit"]
+
+        legs_html = f"Buy a {opt_word} at <b>${strike:.0f}</b>"
+        if is_call:
+            n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to buy at ${strike:.0f}."
+            n2 = f"Profitable above <b>${be}</b> at expiration. Upside is <b>unlimited</b>."
+            n3 = f"Maximum loss is <b>${ml}</b> (the premium paid) if the stock closes ≤ ${strike:.0f}."
+        else:
+            n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to sell at ${strike:.0f}."
+            n2 = f"Profitable below <b>${be}</b> at expiration."
+            n3 = f"Maximum loss is <b>${ml}</b> (the premium paid) if the stock closes ≥ ${strike:.0f}."
+
+        table = (
+            f"{'Metric':<{col}}│  Value\n"
+            f"{'─' * col}┼{'─' * 20}\n"
+            + row(f"Buy {opt_word}", f"${strike:.0f}  @  ${s['buy_price']:.2f}/share")
+            + divider()
+            + row("Net debit",   f"-{per_share}  ({per_cont}/contract)")
+            + row("Break-even",  f"${be}")
+            + divider()
+            + row("POP",         f"{s['pop']*100:.0f}%")
+            + row("P50",         f"{s['p50']*100:.0f}%")
+            + divider()
+            + row("Max profit",  f"+${mp} est." if is_call else f"+${mp}")
+            + row("Max loss",    f"-${ml}")
+            + row("ROC",         f"{s['roc']:.1f}% est.")
+            + row("Theta",       f"{theta_str}/day")
+            + row("Delta",       f"{s['pos_delta']:+.3f}")
+        ).rstrip("\n")
+
+        def _pnl_at_single(px: float) -> int:
+            if is_call:
+                return int(round((max(0, px - strike) - abs(s["net"])) * 100))
+            else:
+                return int(round((max(0, strike - px) - abs(s["net"])) * 100))
+
+        step   = round(abs(s["net"]) * 2, 2) or round(strike * 0.03, 2)
+        prices = sorted({round(be - step, 2), round(be, 2), round(be + step, 2),
+                         round(strike, 2), round(strike + step * 2, 2)})
+        scen_lines = [f"{'Stock Price':>12}  {'P&L (1 contract)':>18}  {'Outcome':<15}"]
+        scen_lines.append("─" * 52)
+        for px in prices:
+            pnl  = _pnl_at_single(px)
+            sign = "+" if pnl >= 0 else ""
+            outcome = ("Max loss ❌" if pnl <= -ml else
+                       "Break-even ~" if abs(pnl) <= 2 else
+                       "Profit ✅" if pnl > 0 else "Loss")
+            scen_lines.append(f"${px:>11.2f}  {sign}${abs(pnl):>16}  {outcome}")
+        scenarios = "<pre>" + "\n".join(scen_lines) + "</pre>"
+
+        return (
+            f"<b>The Legs</b><br>\n  {legs_html}<br>\n<br>\n"
+            f"<b>How it works</b><br>\n  {n1}<br>\n  {n2}<br>\n  {n3}<br>\n<br>\n"
+            f"<b>Key Numbers</b>\n<pre>{table}</pre>"
+            f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}"
+        )
+
+    # ── Two-leg: Long Straddle / Long Strangle ────────────────────────────────
+    if kind in ("long_straddle", "long_strangle"):
+        call_s   = s["buy_strike"]
+        put_s    = s["sell_strike"]
+        total    = s.get("total_debit", abs(s["net"]))
+        upper_be = s["breakeven"]
+        lower_be = s.get("breakeven_lower", round(put_s - total, 2))
+        ml       = s["max_loss"]
+        mp       = s["max_profit"]
+        label    = "Straddle" if kind == "long_straddle" else "Strangle"
+
+        n1 = f"You pay {per_share}/share ({per_cont}/contract) total for both options."
+        n2 = (f"Profitable if the stock moves <b>above ${upper_be}</b> or <b>below ${lower_be}</b>."
+              f" Maximum loss occurs if the stock pins near ${call_s:.0f} at expiration.")
+        n3 = f"This is a <b>volatility play</b> — direction doesn't matter, magnitude does."
+
+        table = (
+            f"{'Metric':<{col}}│  Value\n"
+            f"{'─' * col}┼{'─' * 20}\n"
+            + row("Buy Call", f"${call_s:.0f}  @  ${s['buy_price']:.2f}/share")
+            + row("Buy Put",  f"${put_s:.0f}  @  ${s['sell_price']:.2f}/share")
+            + divider()
+            + row("Net debit",     f"-{per_share}  ({per_cont}/contract)")
+            + row("Upper B/E",     f"${upper_be}")
+            + row("Lower B/E",     f"${lower_be}")
+            + divider()
+            + row("POP",           f"{s['pop']*100:.0f}%")
+            + row("P50",           f"{s['p50']*100:.0f}%")
+            + divider()
+            + row("Max profit",    f"+${mp} est.")
+            + row("Max loss",      f"-${ml}")
+            + row("ROC",           f"{s['roc']:.1f}% est.")
+            + row("Theta",         f"{theta_str}/day")
+            + row("Net delta",     f"{s['pos_delta']:+.3f}")
+        ).rstrip("\n")
+
+        def _pnl_at_straddle(px: float) -> int:
+            call_pnl = max(0, px - call_s) - s["buy_price"]
+            put_pnl  = max(0, put_s  - px) - s["sell_price"]
+            return int(round((call_pnl + put_pnl) * 100))
+
+        step   = round(total * 1.5, 2) or round(call_s * 0.05, 2)
+        prices = sorted({round(lower_be - step/2, 2), round(lower_be, 2),
+                         round((call_s + put_s) / 2, 2),
+                         round(upper_be, 2), round(upper_be + step/2, 2)})
+        scen_lines = [f"{'Stock Price':>12}  {'P&L (1 contract)':>18}  {'Outcome':<15}"]
+        scen_lines.append("─" * 52)
+        for px in prices:
+            pnl  = _pnl_at_straddle(px)
+            sign = "+" if pnl >= 0 else ""
+            outcome = ("Max loss ❌" if pnl <= -ml else
+                       "Break-even ~" if abs(pnl) <= 2 else
+                       "Profit ✅" if pnl > 0 else "Loss")
+            scen_lines.append(f"${px:>11.2f}  {sign}${abs(pnl):>16}  {outcome}")
+        scenarios = "<pre>" + "\n".join(scen_lines) + "</pre>"
+
+        return (
+            f"<b>The Legs</b><br>\n"
+            f"  Buy a Call at <b>${call_s:.0f}</b><br>\n"
+            f"  Buy a Put at <b>${put_s:.0f}</b><br>\n<br>\n"
+            f"<b>How it works</b><br>\n  {n1}<br>\n  {n2}<br>\n  {n3}<br>\n<br>\n"
+            f"<b>Key Numbers</b>\n<pre>{table}</pre>"
+            f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}"
+        )
+
+    # ── Vertical debit spread: Long Call Spread / Long Put Spread ─────────────
+    is_call   = "call" in kind
+    opt_word  = "Call" if is_call else "Put"
+    sell_leg  = f"Sell a {opt_word} at <b>${s['sell_strike']:.0f}</b>"
+    buy_leg   = f"Buy a {opt_word} at <b>${s['buy_strike']:.0f}</b>"
+
+    if kind == "bear_put":
+        n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to profit from a decline."
+        n2 = f"The trade becomes profitable if the stock falls <b>below ${s['breakeven']}</b> at expiration."
+        n3 = f"Maximum gain of <b>${s['max_profit']}</b> is locked in below ${s['sell_strike']:.0f}."
+        prot = "protection"
+    else:  # bull_call
+        n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to profit from a rise."
+        n2 = f"The trade becomes profitable if the stock rises <b>above ${s['breakeven']}</b> at expiration."
+        n3 = f"Maximum gain of <b>${s['max_profit']}</b> is locked in above ${s['sell_strike']:.0f}."
+        prot = "cap"
+
     table = (
         f"{'Metric':<{col}}│  Value\n"
         f"{'─' * col}┼{'─' * 20}\n"
-        + row(f"Sell {opt_word}", f"${s['sell_strike']:.0f}  @  ${s['sell_price']:.2f}/share")
         + row(f"Buy {opt_word}",  f"${s['buy_strike']:.0f}  @  ${s['buy_price']:.2f}/share")
+        + row(f"Sell {opt_word}", f"${s['sell_strike']:.0f}  @  ${s['sell_price']:.2f}/share")
         + divider()
-        + row(net_label,          f"{net_sign}{per_share}  ({per_cont}/contract)")
-        + row("Break-even",       f"${s['breakeven']}")
+        + row("Net debit",   f"-{per_share}  ({per_cont}/contract)")
+        + row("Break-even",  f"${s['breakeven']}")
         + divider()
-        + row("POP",              f"{s['pop']*100:.0f}%")
-        + row("P50",              f"{s['p50']*100:.0f}%")
+        + row("POP",         f"{s['pop']*100:.0f}%")
+        + row("P50",         f"{s['p50']*100:.0f}%")
         + divider()
-        + row("Max profit",       f"+${s['max_profit']}")
-        + row("Max loss",         f"-${s['max_loss']}")
-        + row("ROC",              f"{s['roc']:.1f}%")
-        + row("Theta",            f"{theta_str}/day")
-        + row("Delta",            f"{s['pos_delta']:+.3f}")
-        + row("Spread",           f"${s['spread']:.0f}")
+        + row("Max profit",  f"+${s['max_profit']}")
+        + row("Max loss",    f"-${s['max_loss']}")
+        + row("ROC",         f"{s['roc']:.1f}%")
+        + row("Theta",       f"{theta_str}/day")
+        + row("Delta",       f"{s['pos_delta']:+.3f}")
+        + row("Spread",      f"${s['spread']:.0f}")
     ).rstrip("\n")
 
-    # ── Payoff scenarios at expiration ────────────────────────────────────────
-    lo = min(s["buy_strike"], s["sell_strike"])
-    hi = max(s["buy_strike"], s["sell_strike"])
-    be = s["breakeven"]
-    mp = s["max_profit"]
-    ml = s["max_loss"]
-    net = abs(s["net"])
+    lo   = min(s["buy_strike"], s["sell_strike"])
+    hi   = max(s["buy_strike"], s["sell_strike"])
+    be   = s["breakeven"]
+    mp   = s["max_profit"]
+    ml   = s["max_loss"]
+    net  = abs(s["net"])
+    step = round((hi - lo) / 4, 2)
 
-    def _pnl_at(stock_price: float) -> int:
-        """Approximate P&L (in dollars, 1 contract) at expiration."""
-        K_short = s["sell_strike"]
-        K_long  = s["buy_strike"]
-        is_call = "call" in s["kind"]
-        if s["is_credit"]:
-            if is_call:   # bear call: profit if stock < K_short
-                intrinsic_short = max(0, stock_price - K_short)
-                intrinsic_long  = max(0, stock_price - K_long)
-            else:         # bull put: profit if stock > K_short
-                intrinsic_short = max(0, K_short - stock_price)
-                intrinsic_long  = max(0, K_long  - stock_price)
-            pnl = (net - (intrinsic_short - intrinsic_long)) * 100
+    def _pnl_at_vertical(stock_price: float) -> int:
+        K_buy  = s["buy_strike"]
+        K_sell = s["sell_strike"]
+        if is_call:
+            pnl = (max(0, stock_price - K_buy) - max(0, stock_price - K_sell) - net) * 100
         else:
-            if is_call:   # bull call: profit if stock > K_short (buy lower)
-                intrinsic_buy  = max(0, stock_price - K_long)
-                intrinsic_sell = max(0, stock_price - K_short)
-            else:         # bear put: profit if stock < K_short (buy higher)
-                intrinsic_buy  = max(0, K_long  - stock_price)
-                intrinsic_sell = max(0, K_short - stock_price)
-            pnl = (intrinsic_buy - intrinsic_sell - net) * 100
+            pnl = (max(0, K_buy - stock_price) - max(0, K_sell - stock_price) - net) * 100
         return int(round(pnl))
 
-    step   = round((hi - lo) / 4, 2)
-    prices = sorted({
-        round(lo - step, 2),
-        lo, be, hi,
-        round(hi + step, 2),
-    })
+    prices = sorted({round(lo - step, 2), lo, be, hi, round(hi + step, 2)})
     scen_lines = [f"{'Stock Price':>12}  {'P&L (1 contract)':>18}  {'Outcome':<20}"]
     scen_lines.append("─" * 56)
     for px in prices:
-        pnl = _pnl_at(px)
+        pnl  = _pnl_at_vertical(px)
         sign = "+" if pnl >= 0 else ""
-        if pnl >= mp:
-            outcome = "Max profit ✅"
-        elif pnl <= -ml:
-            outcome = "Max loss ❌"
-        elif abs(pnl) <= 2:
-            outcome = "Break-even ~"
-        elif pnl > 0:
-            outcome = "Profit"
-        else:
-            outcome = "Loss"
+        outcome = ("Max profit ✅" if pnl >= mp else
+                   "Max loss ❌"   if pnl <= -ml else
+                   "Break-even ~"  if abs(pnl) <= 2 else
+                   "Profit"        if pnl > 0 else "Loss")
         scen_lines.append(f"${px:>11.2f}  {sign}${abs(pnl):>16}  {outcome}")
-
     scenarios = "<pre>" + "\n".join(scen_lines) + "</pre>"
 
     return (
         f"<b>The Legs</b><br>\n"
-        f"  {sell_leg}<br>\n"
-        f"  {buy_leg} <i>(protection)</i><br>\n<br>\n"
-
-        f"<b>How it works</b><br>\n"
-        f"  {n1}<br>\n"
-        f"  {n2}<br>\n"
-        f"  {n3}<br>\n<br>\n"
-
-        f"<b>Key Numbers</b>\n"
-        f"<pre>{table}</pre>"
-
-        f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n"
-        f"{scenarios}"
+        f"  {buy_leg}<br>\n"
+        f"  {sell_leg} <i>({prot})</i><br>\n<br>\n"
+        f"<b>How it works</b><br>\n  {n1}<br>\n  {n2}<br>\n  {n3}<br>\n<br>\n"
+        f"<b>Key Numbers</b>\n<pre>{table}</pre>"
+        f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}"
     )
 
 
 def _fmt_order_button(s: dict, ticker: str) -> str:
+    if s["kind"] not in ("bull_call", "bear_put"):
+        return ""   # order placement only implemented for 2-leg vertical spreads
     right       = "C" if "call" in s["kind"] else "P"
-    net_display = f"+${s['max_profit']} credit" if s["is_credit"] else f"-${s['max_loss']} debit"
+    net_display = f"-${s['max_loss']} debit"
     return (
         f'<div class="order-panel">'
         f'<div class="order-panel-label">📋 Recommended trade — place via IB Gateway</div>'
@@ -560,7 +736,7 @@ def _fmt_order_button(s: dict, ticker: str) -> str:
         f'<label class="qty-label">Qty'
         f'<input type="number" name="quantity" value="1" min="1" max="100" class="qty-input">'
         f'</label>'
-        f'<button type="submit" class="btn order-btn">🚀 Place {s["name"]}</button>'
+        f'<button type="submit" class="btn order-btn">📋 Stage in TWS — {s["name"]}</button>'
         f'<span class="order-net">{net_display} · {ticker} {right} {s["sell_strike"]:.0f}/{s["buy_strike"]:.0f} {s["exp"]}</span>'
         f'</div>'
         f'</form>'
@@ -571,39 +747,52 @@ def _fmt_order_button(s: dict, ticker: str) -> str:
 
 
 def _pnl_chart(s: dict) -> str:
-    mp = s["max_profit"]
-    ml = s["max_loss"]
-    be = s["breakeven"]
-    lo = min(s["buy_strike"], s["sell_strike"])
-    hi = max(s["buy_strike"], s["sell_strike"])
+    mp   = s["max_profit"]
+    ml   = s["max_loss"]
+    be   = s["breakeven"]
     kind = s["kind"]
 
-    if kind == "bear_call":
+    if kind == "long_call":
+        k = s["buy_strike"]
         return (
-            f"+${mp} ┤──────────────────────\n"
-            f"    $0 ┤──────┬───────────────\n"
-            f" -${ml} ┤██████│\n"
-            f"       ${lo:.0f}  B/E:${be}  ${hi:.0f}"
+            f"   ∞  ┤                    /\n"
+            f"  $0  ┤───────────────────/\n"
+            f" -${ml} ┤███████████████████\n"
+            f"       ${k:.0f}  B/E:${be}"
+        )
+    elif kind == "long_put":
+        k = s["buy_strike"]
+        return (
+            f"+${mp} ┤\\\n"
+            f"   $0  ┤────────────────────\n"
+            f" -${ml} ┤                ████\n"
+            f"        ${k:.0f}  B/E:${be}"
+        )
+    elif kind in ("long_straddle", "long_strangle"):
+        lower_be = s.get("breakeven_lower", "?")
+        mid      = s.get("call_strike", s["buy_strike"])
+        return (
+            f"   ∞  ┤\\                  /\n"
+            f"  $0  ┤─\\────────────────/─\n"
+            f" -${ml} ┤  ████████████████\n"
+            f"       ${lower_be}  ${mid:.0f}  ${be}"
         )
     elif kind == "bear_put":
+        lo = min(s["buy_strike"], s["sell_strike"])
+        hi = max(s["buy_strike"], s["sell_strike"])
         return (
             f"+${mp} ┤──────┐\n"
             f"    $0 ┤───────┴───────────────\n"
             f" -${ml} ┤              ██████████\n"
             f"       ${lo:.0f}  B/E:${be}  ${hi:.0f}"
         )
-    elif kind == "bull_call":
+    else:  # bull_call
+        lo = min(s["buy_strike"], s["sell_strike"])
+        hi = max(s["buy_strike"], s["sell_strike"])
         return (
             f"+${mp} ┤──────────────┌────────\n"
             f"    $0 ┤────────────┬─┘\n"
             f" -${ml} ┤████████████│\n"
-            f"       ${lo:.0f}  B/E:${be}  ${hi:.0f}"
-        )
-    else:  # bull_put
-        return (
-            f"+${mp} ┤────────────────┐\n"
-            f"    $0 ┤─────────────────┴─────\n"
-            f" -${ml} ┤                   █████\n"
             f"       ${lo:.0f}  B/E:${be}  ${hi:.0f}"
         )
 
@@ -797,10 +986,8 @@ class OptionsResearchAgent(BaseAgent):
             if best:
                 pop_pct   = f"{best['pop']*100:.0f}%"
                 p50_pct   = f"{best['p50']*100:.0f}%"
-                net_desc  = (f"collecting <b>${best['max_profit']}</b> credit"
-                             if best["is_credit"] else f"paying <b>${best['max_loss']}</b> debit")
-                risk_desc = (f"<b>${best['max_loss']}</b> maximum loss"
-                             if best["is_credit"] else f"<b>${best['max_profit']}</b> maximum gain")
+                net_desc  = f"paying <b>${best['max_loss']}</b> debit"
+                risk_desc = f"<b>${best['max_profit']}</b> maximum gain"
                 parts.append(
                     f"\n🏆 <b>Recommended: {best['num']} {best['name']}</b>\n"
                     f"<b>{_fmt_exp(best['exp'])}  ·  {best['dte']} days to expiration</b>\n"

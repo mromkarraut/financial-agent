@@ -185,20 +185,26 @@ async def place_spread(
             ticker, short_contract.conId, long_contract.conId, is_credit
         )
 
-        # Limit order — for credit spread SELL the combo, for debit BUY
-        action = "SELL" if is_credit else "BUY"
-        order  = LimitOrder(action, quantity, round(abs(net_price), 2))
+        # IBKR BAG combo convention: always BUY the combo; the leg actions (SELL/BUY per leg)
+        # define the spread direction. Credit spreads use a negative limit price (you receive that
+        # amount); debit spreads use a positive limit price (you pay that amount).
+        # Sending SELL + positive price causes IBKR to reverse the legs AND flag the price as invalid.
+        action     = "BUY"
+        ibkr_price = -round(abs(net_price), 2) if is_credit else round(abs(net_price), 2)
+        order      = LimitOrder(action, quantity, ibkr_price)
         order.tif       = tif
         order.account   = account
         order.outsideRth = False
+        order.overridePercentConstraints = True
+        order.transmit  = False  # stage in TWS without sending — user must click Transmit in TWS
 
         trade = ib.placeOrder(combo, order)
         await asyncio.sleep(1)  # let TWS confirm
 
         ms         = int((time.monotonic() - t0) * 1000)
         order_id   = trade.order.orderId
-        status_str = trade.orderStatus.status or "Submitted"
-        icon       = "✅" if "submit" in status_str.lower() or "fill" in status_str.lower() else "⚠️"
+        status_str = trade.orderStatus.status or "Staged"
+        icon       = "📋"
 
         summary = _spread_summary(ticker, short_strike, long_strike, right, expiry, net_price, quantity)
         opt_type = "Put" if right == "P" else "Call"
@@ -211,7 +217,7 @@ async def place_spread(
         await _log_call("place_spread", ms, f"{ticker} {right}{short_strike}/{long_strike} {expiry}")
 
         return (
-            f"{_paper_header()}{icon} {status_str}\n\n"
+            f"{_paper_header()}{icon} Staged in TWS — open TWS and click Transmit to send\n\n"
             f"{summary}\n\n"
             f"IBKR Order ID  {order_id}\n"
             f"Account        {account}\n"
@@ -274,6 +280,29 @@ async def cancel_open_order(order_id: int) -> str:
         return f"Not connected: {exc}"
     except Exception as exc:
         return f"Cancel failed: {exc}"
+
+
+async def cancel_all_open_orders() -> str:
+    """Cancel every open/pending order currently on the exchange."""
+    await _ensure_db()
+    t0 = time.monotonic()
+    try:
+        ib = await connect_ib(CLIENT_ID)
+        await ib.reqAllOpenOrdersAsync()
+        await asyncio.sleep(0.3)
+        open_trades = ib.openTrades()
+        if not open_trades:
+            return "No open orders to cancel."
+        for trade in open_trades:
+            ib.cancelOrder(trade.order)
+        await asyncio.sleep(0.5)
+        ms = int((time.monotonic() - t0) * 1000)
+        await _log_call("cancel_all_open_orders", ms, f"cancelled {len(open_trades)} orders")
+        return f"Cancel request sent for {len(open_trades)} order(s) ({ms}ms)."
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
+    except Exception as exc:
+        return f"Cancel all failed: {exc}"
 
 
 @mcp.tool()
