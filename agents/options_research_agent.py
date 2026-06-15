@@ -177,11 +177,21 @@ def _is_vertical(buy_strike: float, sell_strike: float, buy_row: dict,
     )
 
 
-def _generate_strategies(outlook: str, chains: list[dict], price: float) -> list[dict]:
+def _dte_rank_key(s: dict, dte_target: int) -> tuple:
+    """Sort key that prefers strategies within tolerance of dte_target, then by POP."""
+    tol = max(10, dte_target // 3)
+    dist = abs(s.get("dte", 0) - dte_target)
+    return (dist > tol, dist, -s["pop"])   # (out-of-tolerance last, closer first, higher POP first)
+
+
+def _generate_strategies(outlook: str, chains: list[dict], price: float,
+                          dte_target: int = 0) -> list[dict]:
     """
     Generate vertical spread candidates only.
     A vertical spread: same expiration, same option type (all calls or all puts),
     two different strikes — one bought, one sold.
+    When dte_target > 0, strategies whose expiration is closest to that target
+    are ranked first within each credit/debit group (guardrail).
     """
     candidates: list[dict] = []
 
@@ -252,11 +262,16 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float) -> list
                 _add_vertical(f"Bear Put Spread ({width})", "bear_put",
                               atm, otm, puts_m.get(atm, {}), puts_m.get(otm, {}))
 
-    # Rank each type by POP (tastytrade primary metric), then blend:
-    # show best 3 credit verticals + best 2 debit verticals (or fill from either
-    # side if one type is unavailable).
-    credits = sorted([c for c in candidates if     c["is_credit"]], key=lambda s: -s["pop"])
-    debits  = sorted([c for c in candidates if not c["is_credit"]], key=lambda s: -s["pop"])
+    # Rank each type by POP (tastytrade primary metric), then blend.
+    # When dte_target is set, DTE proximity is the primary sort key within
+    # each group so the target expiration surfaces to the top (guardrail).
+    if dte_target > 0:
+        rank = lambda s: _dte_rank_key(s, dte_target)   # noqa: E731
+    else:
+        rank = lambda s: -s["pop"]                        # noqa: E731
+
+    credits = sorted([c for c in candidates if     c["is_credit"]], key=rank)
+    debits  = sorted([c for c in candidates if not c["is_credit"]], key=rank)
     candidates = (credits[:3] + debits[:2]) or (credits[:5]) or (debits[:5])
     top5 = candidates[:5]
     for i, s in enumerate(top5):
@@ -718,9 +733,28 @@ class OptionsResearchAgent(BaseAgent):
             # Load previous research for this chat+ticker
             prev = await _load_memory(chat_id, ticker) if chat_id else None
 
-            # Generate and rank strategies
-            strategies = _generate_strategies(outlook, chains, price)
+            # Generate and rank strategies (guardrail: DTE target preference applied inside)
+            strategies = _generate_strategies(outlook, chains, price, dte_target=dte_target)
             best = strategies[0] if strategies else None
+
+            # ── DTE alignment guardrail ───────────────────────────────────────
+            dte_note: str | None = None
+            if dte_target > 0 and best:
+                tol       = max(10, dte_target // 3)
+                actual    = best.get("dte", 0)
+                diff      = abs(actual - dte_target)
+                exp_label = f"{actual}d ({_fmt_exp(best.get('exp', ''))})"
+                if diff > tol:
+                    dte_note = (
+                        f'⚠️ <b>DTE mismatch</b> — no expiration within {tol}d of your '
+                        f'<b>{dte_target}d</b> target. '
+                        f'Showing closest available: <b>{exp_label}</b>.'
+                    )
+                elif diff > 3:
+                    dte_note = (
+                        f'ℹ️ Closest expiration to your <b>{dte_target}d</b> target: '
+                        f'<b>{exp_label}</b>.'
+                    )
 
             # ── Build output ──────────────────────────────────────────────────
             parts: list[str] = []
@@ -741,6 +775,10 @@ class OptionsResearchAgent(BaseAgent):
             )
             if hv_30d:
                 parts[-1] += f"  HV30: <code>{hv_30d*100:.1f}%</code>"
+
+            # DTE guardrail note (shown between header and expiration selector)
+            if dte_note:
+                parts.append(dte_note)
 
             # Expiration selector
             if chains:
