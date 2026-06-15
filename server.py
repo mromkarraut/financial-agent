@@ -679,6 +679,22 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
   padding: 10px 22px; font-size: 11px; color: var(--dim);
   grid-column: 1 / -1;
 }
+.fund-charts-row {
+  grid-column: 1 / -1; padding: 16px 22px;
+  border-bottom: 1px solid var(--border);
+}
+.fund-charts-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  margin-top: 12px;
+}
+.fund-charts-grid .fund-chart-title,
+.fund-charts-row  .fund-chart-title {
+  font-size: 10px; font-weight: 700; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px;
+}
+/* plotly chart containers */
+.fund-chart-wrap { min-width: 0; overflow: hidden; }
+.js-plotly-plot { width: 100% !important; }
 
 /* ── Order panel ── */
 .order-panel {
@@ -1040,34 +1056,28 @@ async def _build_fundamentals_html(ticker: str) -> str:
         _row("Rev Growth YoY", _signed(data.get("revenue_growth_yoy_pct"))),
     ])
 
-    # ── Quarterly revenue chart ───────────────────────────────────────────────
-    qtrs = data.get("quarterly_revenues") or []
-    chart_html = ""
-    if qtrs:
-        max_rev = max((q["revenue_b"] for q in qtrs), default=1) or 1
-        lines = []
-        for q in qtrs:
-            period  = q["period"][:7]   # YYYY-MM
-            rev     = q["revenue_b"]
-            qoq     = q.get("qoq_pct")
-            filled  = round(rev / max_rev * 14)
-            bar     = "█" * filled + "░" * (14 - filled)
-            qoq_s   = (f"  {'+' if qoq >= 0 else ''}{qoq:.1f}% QoQ" if qoq is not None else "")
-            lines.append(f"{period}  {bar}  ${rev:.1f}B{qoq_s}")
-        chart_html = (
-            f'<div class="fund-chart-section">'
-            f'<div class="fund-section-title">Quarterly Revenue</div>'
-            f'<pre>{"chr(10)".join(lines)}</pre>'
+    # ── Plotly charts ─────────────────────────────────────────────────────────
+    from tools.charts import generate_fundamentals_charts
+    charts = generate_fundamentals_charts(data)
+
+    rev_section = ""
+    if charts.get("revenue"):
+        rev_section = (
+            f'<div class="fund-charts-row">'
+            f'{charts["revenue"]}'
             f'</div>'
         )
-        # Fix: use actual newline
-        chart_inner = "\n".join(lines)
-        chart_html = (
-            f'<div class="fund-chart-section">'
-            f'<div class="fund-section-title">Quarterly Revenue</div>'
-            f'<pre>{chart_inner}</pre>'
-            f'</div>'
-        )
+
+    side_charts = ""
+    margin_html = charts.get("margins", "")
+    val_html    = charts.get("valuation", "")
+    if margin_html or val_html:
+        inner = ""
+        if margin_html:
+            inner += f'<div class="fund-chart-wrap">{margin_html}</div>'
+        if val_html:
+            inner += f'<div class="fund-chart-wrap">{val_html}</div>'
+        side_charts = f'<div class="fund-charts-row"><div class="fund-charts-grid">{inner}</div></div>'
 
     html = (
         f'<div class="fund-full">'
@@ -1085,7 +1095,8 @@ async def _build_fundamentals_html(ticker: str) -> str:
         f'<div class="fund-section-title">Profitability &amp; Health</div>'
         f'{prof_rows}'
         f'</div>'
-        f'{chart_html}'
+        f'{rev_section}'
+        f'{side_charts}'
         f'<div class="fund-full-footer">Source: {src_link}</div>'
         f'</div>'
         f'</div>'
@@ -1323,6 +1334,7 @@ def _page(history: list[dict], active_tab: str = "search",
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>FinAgent</title>
   <script src="https://unpkg.com/htmx.org@2.0.3/dist/htmx.min.js" defer></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
   <style>{_CSS}</style>
 </head>
 <body>

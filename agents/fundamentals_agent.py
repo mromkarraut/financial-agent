@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 
 import config
 from agents.base_agent import AgentResult, BaseAgent
+from tools.charts import generate_fundamentals_charts
 from tools.market_data import get_fundamentals
 
 logger = logging.getLogger(__name__)
@@ -121,11 +122,14 @@ class FundamentalsAgent(BaseAgent):
                 + rev_table
             )
 
+            # Generate interactive Plotly charts (web display only)
+            charts = generate_fundamentals_charts(data)
+
             return AgentResult(
                 agent=self.name, version=self.version,
                 output=header + analysis,
                 confidence=0.85,
-                metadata={"fundamentals": data},
+                metadata={"fundamentals": data, "charts": charts},
             )
 
         except Exception as exc:
