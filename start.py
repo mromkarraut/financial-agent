@@ -86,25 +86,23 @@ signal.signal(signal.SIGTERM, _stop_all)
 
 # ── Gateway helpers ────────────────────────────────────────────────────────────
 
-def _gateway_reachable() -> bool:
-    """Quick TCP check — is something listening on localhost:5000?"""
+def _port_reachable(port: int) -> bool:
+    """Quick TCP check — is something listening on localhost:port?"""
     try:
-        with socket.create_connection(("127.0.0.1", 5000), timeout=1.5):
+        with socket.create_connection(("127.0.0.1", port), timeout=1.5):
             return True
     except OSError:
         return False
 
 
-def _wait_for_gateway(timeout: int = 45) -> bool:
-    """Poll until the gateway TCP port is open or timeout expires."""
+def _wait_for_port(port: int, timeout: int = 45) -> bool:
+    """Poll until the given TCP port is open or timeout expires."""
     deadline = time.time() + timeout
-    dots = 0
     while time.time() < deadline:
-        if _gateway_reachable():
-            print()  # newline after dots
+        if _port_reachable(port):
+            print()
             return True
         print(".", end="", flush=True)
-        dots += 1
         time.sleep(2)
     print()
     return False
@@ -150,66 +148,107 @@ def init_db() -> None:
     ok("state.db created")
 
 
-def start_gateway(paper: bool = True) -> bool:
+def start_tws_gateway(paper: bool = True) -> bool:
     """
-    Start the IBKR CP Gateway in background.
-    Returns True if the gateway is ready (either was already running or started successfully).
+    Launch IB Gateway desktop app (TWS socket API, port 4002/4001).
+    Required for ib_insync MCP servers and IBKR options chain data.
+    Waits up to 120s for the user to log in via the GUI window.
     """
-    step(f"IBKR CP Gateway  [{'📄 PAPER TRADING' if paper else R+'⚠ LIVE TRADING'+RST}]")
+    port = 4002 if paper else 4001
+    step(f"IB Gateway (TWS socket, port {port})  [{'📄 PAPER' if paper else R+'⚠ LIVE'+RST}]")
 
-    # Already running?
-    if _gateway_reachable():
-        ok(f"Gateway already running on https://localhost:5000")
+    if _port_reachable(port):
+        ok(f"IB Gateway already running on port {port}")
+        return True
+
+    # Resolve Windows exe path
+    gw_exe_win = os.environ.get("IBKR_GATEWAY_EXE", r"C:\Jts\ibgateway\1039\ibgateway.exe")
+    gw_exe_wsl = gw_exe_win.replace("C:\\", "/mnt/c/").replace("\\", "/")
+
+    if not os.path.exists(gw_exe_wsl):
+        warn(f"IB Gateway not found at {gw_exe_win}")
+        warn("Install from: https://www.interactivebrokers.com/en/trading/ibgateway-stable.php")
+        warn("Options research will fall back to yfinance until IB Gateway is available.")
+        return False
+
+    subprocess.Popen(
+        ["cmd.exe", "/c", "start", "", gw_exe_win],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    ok(f"IB Gateway launched")
+
+    mode_label = "PAPER" if paper else "LIVE"
+    acct_hint  = "account starts with DU" if paper else "LIVE account — REAL MONEY"
+    print(f"\n  {M}{'━'*56}{RST}")
+    print(f"  {M}  IB Gateway login required ({mode_label}){RST}")
+    print(f"  {M}  1. Log in via the IB Gateway window that just opened{RST}")
+    print(f"  {M}  2. Use your {('paper trading' if paper else 'LIVE')} credentials ({acct_hint}){RST}")
+    print(f"  {M}  3. Enable API: Configure → Settings → API → Socket port {port}{RST}")
+    if not paper:
+        print(f"  {R}  ⚠  LIVE ACCOUNT — orders will use real money{RST}")
+    print(f"  {M}{'━'*56}{RST}\n")
+
+    print(f"  {DIM}Waiting for IB Gateway login (up to 120s).", end="", flush=True)
+    ready = _wait_for_port(port, timeout=120)
+
+    if ready:
+        ok(f"IB Gateway ready — ib_insync will connect on port {port}")
+        return True
+    else:
+        warn(f"IB Gateway did not open port {port} in time.")
+        warn("Log in when you're ready — options research will connect automatically.")
+        return False
+
+
+def start_cp_gateway(paper: bool = True) -> bool:
+    """
+    Start the IBKR CP Gateway JAR (REST API, port 5000).
+    Used by the legacy ibkr MCP server and agents/ibkr_agent.py.
+    """
+    step(f"IBKR CP Gateway (REST, port 5000)  [{'📄 PAPER' if paper else R+'⚠ LIVE'+RST}]")
+
+    if _port_reachable(5000):
+        ok(f"CP Gateway already running on https://localhost:5000")
         return True
 
     if not os.path.isdir(GW_DIR):
         warn(f"ibkr_gateway/ not found — run start.py from the project root")
         return False
 
-    bat = os.path.join(GW_DIR, "start_gateway.bat")
-    if not os.path.exists(bat):
-        warn(f"start_gateway.bat not found in {GW_DIR}")
-        return False
-
     # The gateway lives on the C: drive so cmd.exe can use normal Windows paths.
     # C:\ibkr_gateway is a copy of ibkr_gateway/ — update it when files change.
     WIN_GW = r"C:\ibkr_gateway"
-    bat    = f"{WIN_GW}\\start_gateway.bat"
     if not os.path.exists("/mnt/c/ibkr_gateway/start_gateway.bat"):
         warn("C:\\ibkr_gateway not found — copying gateway files...")
         subprocess.run(["cp", "-r", GW_DIR, "/mnt/c/ibkr_gateway"], check=True)
         ok("Gateway copied to C:\\ibkr_gateway")
 
     cmd = ["cmd.exe", "/c", f'cd /d "{WIN_GW}" && start_gateway.bat']
-
     os.makedirs(LOG_DIR, exist_ok=True)
     log_fh = open(os.path.join(LOG_DIR, "gateway.log"), "a")
     p = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh, cwd="/mnt/c/Windows")
-    _procs.append((f"IBKR gateway ({'paper' if paper else 'LIVE'})", p))
-    ok(f"IBKR gateway ({'paper' if paper else 'LIVE'})  {DIM}(logs → logs/gateway.log){RST}")
+    _procs.append((f"CP Gateway ({'paper' if paper else 'LIVE'})", p))
+    ok(f"CP Gateway starting  {DIM}(logs → logs/gateway.log){RST}")
 
-    # Wait for TCP port to open (gateway takes ~10-15s to start)
-    print(f"  {DIM}Waiting for gateway to start", end="", flush=True)
-    ready = _wait_for_gateway(timeout=45)
+    print(f"  {DIM}Waiting for CP Gateway to start", end="", flush=True)
+    ready = _wait_for_port(5000, timeout=45)
 
     if ready:
-        ok(f"Gateway ready at https://localhost:5000")
+        ok(f"CP Gateway ready at https://localhost:5000")
         mode_label = "PAPER" if paper else "LIVE"
         print(f"\n  {M}{'━'*54}{RST}")
-        print(f"  {M}  {mode_label} TRADING MODE — Login required{RST}")
+        print(f"  {M}  CP Gateway {mode_label} — browser login required{RST}")
         print(f"  {M}  Open Chrome → https://localhost:5000{RST}")
         if paper:
             print(f"  {M}  Use your PAPER TRADING credentials (account starts DU){RST}")
         else:
             print(f"  {R}  ⚠ LIVE ACCOUNT — real money at risk{RST}")
         print(f"  {M}{'━'*54}{RST}\n")
-        # Auto-open browser on Windows
         _open_browser("https://localhost:5000")
-        # Give user 5 seconds to see the message before bot output scrolls it away
-        time.sleep(5)
+        time.sleep(3)
         return True
     else:
-        warn("Gateway did not start in time — check logs/gateway.log")
+        warn("CP Gateway did not start in time — check logs/gateway.log")
         warn("You can still log in manually once it's ready: https://localhost:5000")
         return False
 
@@ -258,11 +297,14 @@ def _banner(paper: bool) -> None:
 
 
 def _status_line(paper: bool) -> None:
-    mode = f"{M}PAPER{RST}" if paper else f"{R}LIVE ⚠{RST}"
+    mode    = f"{M}PAPER{RST}" if paper else f"{R}LIVE ⚠{RST}"
+    tws_port = 4002 if paper else 4001
+    tws_up  = _port_reachable(tws_port)
+    tws_str = f"port {tws_port}  [{mode}]  {'✅' if tws_up else '❌ not connected'}"
     print(f"""
 {G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RST}
   Web dashboard  →  http://localhost:8000
-  IBKR Gateway   →  https://localhost:5000  [{mode}]
+  IB Gateway     →  {tws_str}
   MCP servers    →  auto-started by Claude Code
   Logs           →  logs/
 {G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RST}
@@ -291,7 +333,7 @@ def main() -> None:
     init_db()
 
     if not args.no_gateway:
-        start_gateway(paper=paper)
+        start_tws_gateway(paper=paper)
 
     start_web()
 

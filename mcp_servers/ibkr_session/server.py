@@ -1,19 +1,19 @@
 """
-IBKR Session MCP Server
+IBKR Session MCP Server  (ib_insync / TWS socket)
 
-Manages the CP Gateway session lifecycle: authentication checks, keepalive
-tickle loop (auto-started on server launch), reauthentication, and account listing.
+Manages IB Gateway connection lifecycle: status, keepalive, account summary.
+Connects to IB Gateway at localhost:4002 (paper) or 4001 (live).
 
-Gateway start command:
-  cd ibkr_gateway && ./bin/run.sh root/conf.yaml
-Then authenticate at https://localhost:5000 in Chrome.
+Prerequisites:
+  1. Start IB Gateway: python start.py  (or run ibkr_gateway/start_ibgateway.bat)
+  2. Log in via the IB Gateway GUI
+  3. Enable API: Edit → Global Configuration → API → Settings → Socket port 4002
 
 Tools:
-  get_auth_status()            → auth + connection state
-  reauthenticate()             → re-open brokerage session (no browser needed if SSO valid)
-  get_accounts()               → list account IDs
-  get_account_summary(acct_id) → net liq, cash, buying power
-  start_tickle_loop()          → start/confirm 55s keepalive (auto-runs on server start)
+  get_connection_status()          → IB Gateway connection + account + mode
+  get_account_summary(acct_id)     → net liq, cash, buying power, margins
+  list_accounts()                  → all managed accounts
+  get_session_log(limit)           → recent events from agent memory
 
 Memory: db/agents/ibkr_session.db
 LLM:    configured via MCP_LLM_PROVIDER / MCP_LLM_MODEL
@@ -34,28 +34,18 @@ from mcp_servers.llm import get_llm_client
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agents.ibkr_agent import (  # noqa: E402
-    auth_status, get_account_summary, get_accounts,
-    reauthenticate, tickle,
-)
-
-# Paper accounts start with "DU"; live accounts start with "U"
-def _is_paper_account(account_id: str) -> bool:
-    return account_id.upper().startswith("DU")
-
-def _trading_mode_label(account_id: str) -> str:
-    if _is_paper_account(account_id):
-        return "📄 PAPER TRADING"
-    return "⚠ LIVE TRADING — REAL MONEY"
+import config  # noqa: E402
+from tools.ibkr_tws import connect_ib, get_account_id, is_paper_account, paper_label  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 _ROOT    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 AGENT_DB = os.path.join(_ROOT, "db", "agents", "ibkr_session.db")
-_llm     = get_llm_client()
+CLIENT_ID = config.IBKR_CLIENT_ID_SESSION
 
-_db_ready    = False
-_tickle_task: asyncio.Task | None = None
+_llm      = get_llm_client()
+_db_ready = False
+_keepalive_task: asyncio.Task | None = None
 
 
 def _utcnow() -> str:
@@ -70,12 +60,12 @@ async def _ensure_db() -> None:
     async with aiosqlite.connect(AGENT_DB) as db:
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS session_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp   TEXT NOT NULL,
-                event       TEXT NOT NULL,
-                authenticated INTEGER,
-                connected   INTEGER,
-                detail      TEXT
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp     TEXT NOT NULL,
+                event         TEXT NOT NULL,
+                connected     INTEGER,
+                account       TEXT,
+                detail        TEXT
             );
             CREATE TABLE IF NOT EXISTS call_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,12 +78,11 @@ async def _ensure_db() -> None:
     _db_ready = True
 
 
-async def _log_session(event: str, auth: bool | None, connected: bool | None, detail: str = "") -> None:
+async def _log(event: str, connected: bool | None = None, account: str = "", detail: str = "") -> None:
     async with aiosqlite.connect(AGENT_DB) as db:
         await db.execute(
-            "INSERT INTO session_log (timestamp, event, authenticated, connected, detail) VALUES (?,?,?,?,?)",
-            (_utcnow(), event, int(auth) if auth is not None else None,
-             int(connected) if connected is not None else None, detail),
+            "INSERT INTO session_log (timestamp, event, connected, account, detail) VALUES (?,?,?,?,?)",
+            (_utcnow(), event, int(connected) if connected is not None else None, account, detail),
         )
         await db.commit()
 
@@ -107,173 +96,159 @@ async def _log_call(tool: str, ms: int) -> None:
         await db.commit()
 
 
-async def _tickle_loop() -> None:
-    """Keep the CP Gateway session alive. Runs every 55 seconds."""
-    logger.info("IBKR tickle loop started")
+async def _keepalive_loop() -> None:
+    """Ping IB Gateway every 55s to keep the connection alive."""
     while True:
         await asyncio.sleep(55)
         try:
-            result = await tickle()
-            if not result.get("iserver", {}).get("authStatus", {}).get("authenticated", True):
-                logger.warning("IBKR session expired — attempting reauth")
-                await reauthenticate()
-                await _log_session("reauth_attempt", None, None)
+            ib = await connect_ib(CLIENT_ID)
+            ib.reqCurrentTime()   # lightweight server ping
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.warning("Tickle failed: %s", exc)
+            logger.warning("Session keepalive failed: %s", exc)
 
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    global _tickle_task
+    global _keepalive_task
     await _ensure_db()
-    _tickle_task = asyncio.create_task(_tickle_loop())
-    logger.info("IBKR session server started — tickle loop active")
+    _keepalive_task = asyncio.create_task(_keepalive_loop())
     yield
-    if _tickle_task:
-        _tickle_task.cancel()
+    if _keepalive_task:
+        _keepalive_task.cancel()
 
 
 mcp = FastMCP(
     name="ibkr-session",
     instructions=(
-        "IBKR CP Gateway session manager. Auto-runs a 55s tickle keepalive. "
-        "Handles auth checks, reauthentication, and account listing."
+        "IB Gateway session manager via ib_insync TWS socket. "
+        "Auto-runs a 55s keepalive. Shows account type (paper/live) and connection state."
     ),
     lifespan=lifespan,
 )
 
 
 @mcp.tool()
-async def get_auth_status() -> str:
+async def get_connection_status() -> str:
     """
-    Check CP Gateway authentication and connection state.
-    Returns auth status, connectivity, and a formatted status card.
+    Check IB Gateway connection status, account ID, and trading mode.
+    Attempts a live socket connection — shows clear error if gateway is not running.
     """
+    await _ensure_db()
     t0 = time.monotonic()
-    s  = await auth_status()
-    ms = int((time.monotonic() - t0) * 1000)
-
-    auth = s.get("authenticated", False)
-    conn = s.get("connected", False)
-    err  = s.get("error", "")
-
-    await _log_session("status_check", auth, conn, err or "ok")
-    await _log_call("get_auth_status", ms)
-
-    if err:
-        return (
-            f"Gateway: UNREACHABLE\n"
-            f"Error: {err}\n\n"
-            f"Start the gateway (paper trading default):\n"
-            f"  python start.py\n"
-            f"Or manually: cd ibkr_gateway && ./bin/run.sh root/conf.paper.yaml\n"
-            f"Then open https://localhost:5000 in Chrome with PAPER credentials."
+    try:
+        ib      = await connect_ib(CLIENT_ID)
+        account = await get_account_id(ib)
+        mode    = paper_label() if not account else (
+            "📄 PAPER TRADING" if is_paper_account(account) else "⚠ LIVE TRADING — REAL MONEY"
         )
-
-    # Auto-detect trading mode from account ID prefix (DU = paper, U = live)
-    mode_label = "Unknown"
-    if auth and conn:
-        try:
-            accounts = await get_accounts()
-            if accounts:
-                mode_label = _trading_mode_label(accounts[0])
-        except Exception:
-            pass
-
-    icon = "✅" if (auth and conn) else "❌"
-    return (
-        f"Gateway Status  {icon}\n\n"
-        f"Mode          : {mode_label}\n"
-        f"Authenticated : {'Yes ✅' if auth else 'No ❌'}\n"
-        f"Connected     : {'Yes ✅' if conn else 'No ❌'}\n"
-        f"Tickle loop   : {'running ✅' if _tickle_task and not _tickle_task.done() else 'stopped ❌'}\n"
-        f"Response time : {ms}ms"
-    )
-
-
-@mcp.tool()
-async def reauthenticate_session() -> str:
-    """
-    Re-open the brokerage session without requiring a browser login.
-    Works if the SSO cookie is still valid (within the session window).
-    """
-    t0  = time.monotonic()
-    res = await reauthenticate()
-    ms  = int((time.monotonic() - t0) * 1000)
-    await _log_session("reauthenticate", None, None, json.dumps(res))
-    await _log_call("reauthenticate_session", ms)
-    return f"Reauthentication result ({ms}ms):\n{json.dumps(res, indent=2)}"
+        accounts = ib.managedAccounts()
+        ms = int((time.monotonic() - t0) * 1000)
+        await _log("status_check", True, account)
+        await _log_call("get_connection_status", ms)
+        return (
+            f"IB Gateway  ✅ Connected\n"
+            f"{'─'*36}\n"
+            f"Mode       : {mode}\n"
+            f"Accounts   : {', '.join(accounts)}\n"
+            f"Host:Port  : {config.IBKR_TWS_HOST}:{config.IBKR_TWS_PORT}\n"
+            f"Client ID  : {CLIENT_ID}\n"
+            f"Keepalive  : {'running ✅' if _keepalive_task and not _keepalive_task.done() else 'stopped'}\n"
+            f"Latency    : {ms}ms"
+        )
+    except ConnectionError as exc:
+        ms = int((time.monotonic() - t0) * 1000)
+        await _log("status_check", False, "", str(exc))
+        await _log_call("get_connection_status", ms)
+        return (
+            f"IB Gateway  ❌ Not connected\n\n"
+            f"{exc}\n\n"
+            f"Steps to fix:\n"
+            f"  1. Run: python start.py  (starts IB Gateway automatically)\n"
+            f"     OR:  run ibkr_gateway/start_ibgateway.bat\n"
+            f"  2. Log in with {'paper' if config.IBKR_PAPER_TRADING else 'live'} credentials\n"
+            f"  3. Enable API: Edit → Global Configuration → API → Settings\n"
+            f"     Socket port: {config.IBKR_TWS_PORT}"
+        )
 
 
 @mcp.tool()
 async def list_accounts() -> str:
-    """List all IBKR account IDs linked to this gateway session."""
-    t0       = time.monotonic()
-    accounts = await get_accounts()
-    ms       = int((time.monotonic() - t0) * 1000)
-    await _log_call("list_accounts", ms)
-    if not accounts:
-        return "No accounts found. Are you authenticated?"
-    return f"Accounts ({len(accounts)}):\n" + "\n".join(f"  • {a}" for a in accounts)
+    """List all managed accounts on this IB Gateway connection."""
+    await _ensure_db()
+    t0 = time.monotonic()
+    try:
+        ib       = await connect_ib(CLIENT_ID)
+        accounts = ib.managedAccounts()
+        ms = int((time.monotonic() - t0) * 1000)
+        await _log_call("list_accounts", ms)
+        lines = [f"Accounts ({len(accounts)}, {ms}ms):"]
+        for a in accounts:
+            mode = "📄 paper" if is_paper_account(a) else "⚠ live"
+            lines.append(f"  {a}  [{mode}]")
+        return "\n".join(lines)
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
 
 
 @mcp.tool()
-async def get_account_details(account_id: str = "") -> str:
+async def get_account_summary(account_id: str = "") -> str:
     """
-    Fetch account summary: net liquidation value, cash balance, buying power,
-    equity, and maintenance margin. Defaults to first account if account_id is empty.
+    Fetch account summary: net liquidation, cash, buying power, margin.
+    Defaults to first managed account if account_id is empty.
     """
+    await _ensure_db()
     t0 = time.monotonic()
-    if not account_id:
-        accounts = await get_accounts()
-        if not accounts:
+    try:
+        ib = await connect_ib(CLIENT_ID)
+        if not account_id:
+            account_id = await get_account_id(ib)
+        if not account_id:
             return "No accounts found."
-        account_id = accounts[0]
 
-    summary = await get_account_summary(account_id)
-    ms = int((time.monotonic() - t0) * 1000)
-    await _log_call("get_account_details", ms)
+        tags = ["NetLiquidation", "TotalCashValue", "BuyingPower",
+                "EquityWithLoanValue", "MaintMarginReq", "InitMarginReq",
+                "UnrealizedPnL", "RealizedPnL"]
+        await ib.reqAccountSummaryAsync()
+        vals_list = await ib.accountSummaryAsync(account_id)
+        ms = int((time.monotonic() - t0) * 1000)
+        await _log_call("get_account_summary", ms)
 
-    def _val(key: str) -> str:
-        v = summary.get(key, {})
-        if isinstance(v, dict):
-            return f"${v.get('amount', v.get('value', 'N/A')):,.2f}" if isinstance(v.get('amount', v.get('value')), (int, float)) else str(v)
-        return str(v)
-
-    col = 22
-    rows = [
-        ("Account",          account_id),
-        ("Net Liquidation",  _val("netliquidation")),
-        ("Cash Balance",     _val("totalcashvalue")),
-        ("Buying Power",     _val("buyingpower")),
-        ("Equity w/ Loan",   _val("equitywithloanvalue")),
-        ("Maint. Margin",    _val("maintenancemarginreq")),
-        ("Init. Margin",     _val("initmarginreq")),
-    ]
-    lines = [f"Account Summary — {account_id}  ({ms}ms)\n"]
-    lines += [f"  {label:<{col}} {value}" for label, value in rows]
-    return "\n".join(lines)
+        col  = 22
+        rows = {v.tag: v.value for v in vals_list if v.tag in tags and v.currency == "USD"}
+        mode = "📄 PAPER" if is_paper_account(account_id) else "⚠ LIVE"
+        lines = [f"Account Summary — {account_id}  [{mode}]  ({ms}ms)\n"]
+        for tag in tags:
+            val = rows.get(tag, "N/A")
+            try:
+                val = f"${float(val):,.2f}"
+            except (ValueError, TypeError):
+                pass
+            lines.append(f"  {tag:<{col}} {val}")
+        return "\n".join(lines)
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
+    except Exception as exc:
+        return f"Error: {exc}"
 
 
 @mcp.tool()
 async def get_session_log(limit: int = 20) -> str:
-    """Return recent session events (auth checks, reauths) from agent memory."""
+    """Return recent session events from agent memory."""
     await _ensure_db()
     async with aiosqlite.connect(AGENT_DB) as db:
         async with db.execute(
-            "SELECT timestamp, event, authenticated, connected, detail "
+            "SELECT timestamp, event, connected, account, detail "
             "FROM session_log ORDER BY id DESC LIMIT ?", (limit,)
         ) as cur:
             rows = await cur.fetchall()
     if not rows:
-        return "No session events recorded yet."
-    lines = [f"Session log (last {limit}, newest first):\n"]
-    for ts, event, auth, conn, detail in rows:
-        a = "✅" if auth else "❌" if auth is not None else "—"
-        c = "✅" if conn else "❌" if conn is not None else "—"
-        lines.append(f"  [{ts[:16].replace('T',' ')}]  {event:<20} auth={a} conn={c}  {detail[:60]}")
+        return "No session events yet."
+    lines = [f"Session log (last {limit}):\n"]
+    for ts, event, conn, account, detail in rows:
+        icon = "✅" if conn else "❌" if conn is not None else "—"
+        lines.append(f"  [{ts[:16].replace('T',' ')}] {icon} {event:<20} {account or ''}  {detail[:60]}")
     return "\n".join(lines)
 
 

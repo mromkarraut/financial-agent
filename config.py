@@ -75,3 +75,22 @@ IBKR_JAVA_BIN: str = os.environ.get(
     "IBKR_JAVA_BIN",
     "/mnt/c/Program Files/Java/jre1.8.0_461/bin/java.exe",
 )
+
+# ── TWS / IB Gateway socket connection (ib_insync) ────────────────────────────
+# IB Gateway paper port: 4002  live port: 4001
+# TWS            paper port: 7497  live port: 7496
+IBKR_TWS_HOST: str = os.environ.get("IBKR_TWS_HOST", "127.0.0.1")
+IBKR_TWS_PORT: int = int(os.environ.get(
+    "IBKR_TWS_PORT",
+    "4002" if IBKR_PAPER_TRADING else "4001",   # IB Gateway defaults
+))
+# clientId range 1-4 reserved for the 4 IBKR MCP servers; 5 = options research (main bot process)
+IBKR_CLIENT_ID_SESSION:          int = int(os.environ.get("IBKR_CLIENT_ID_SESSION",          "1"))
+IBKR_CLIENT_ID_POSITIONS:        int = int(os.environ.get("IBKR_CLIENT_ID_POSITIONS",        "2"))
+IBKR_CLIENT_ID_ORDERS:           int = int(os.environ.get("IBKR_CLIENT_ID_ORDERS",           "3"))
+IBKR_CLIENT_ID_MARKET_DATA:      int = int(os.environ.get("IBKR_CLIENT_ID_MARKET_DATA",      "4"))
+IBKR_CLIENT_ID_OPTIONS_RESEARCH: int = int(os.environ.get("IBKR_CLIENT_ID_OPTIONS_RESEARCH", "5"))
+IBKR_GATEWAY_EXE: str = os.environ.get(
+    "IBKR_GATEWAY_EXE",
+    r"C:\Jts\ibgateway\1039\ibgateway.exe",
+)

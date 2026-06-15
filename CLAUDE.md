@@ -8,28 +8,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Activate the shared venv (required for all commands)
 source /home/omkar/venvs/bin/activate
 
-# Prerequisites — must be started first:
-lms server start          # starts LM Studio API on Windows side (alias in ~/.bashrc → /mnt/c/.../lms.exe)
+# Start everything (recommended)
+python start.py                # IB Gateway + web + Telegram bot (paper trading)
+python start.py --no-lms      # skip LM Studio (already running)
+python start.py --no-gateway  # skip IB Gateway (already running)
+python start.py --live        # LIVE trading account (real money — use with caution)
+python start.py --web-only    # web dashboard only, no Telegram bot
 
-# Telegram bot (also auto-starts a cloudflared tunnel and sets WEB_SERVER_URL)
-python main.py
+# Logs → logs/web.log, logs/gateway.log
 
-# Web dashboard at http://localhost:8000
-python server.py
-# or with auto-reload:
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+# DB migration (run after adding tables to database.py)
+python -c "import asyncio; from db.database import init_db; asyncio.run(init_db())"
 
-# Run UI test suite (hits the live server, takes ~10s)
-python -c "
-import asyncio, re
-from agents.ui_testing_agent import UITestingAgent
-async def run():
-    r = await UITestingAgent().run_all()
-    print(re.sub(r'<[^>]+>', '', r))
-asyncio.run(run())
-"
-
-# Quick agent smoke-test (no server needed)
+# Quick options research smoke-test (no server needed)
 python -c "
 import asyncio
 from agents.options_research_agent import OptionsResearchAgent
@@ -39,8 +30,11 @@ async def t():
 asyncio.run(t())
 "
 
-# DB migration (run after adding tables to database.py)
-python -c "import asyncio; from db.database import init_db; asyncio.run(init_db())"
+# List all MCP servers and their tools
+python -m mcp_servers.registry
+
+# Run an individual MCP server (Claude Code auto-starts via .claude/settings.json)
+python -m mcp_servers.ibkr_session.server
 ```
 
 ## Architecture
@@ -52,7 +46,7 @@ python -c "import asyncio; from db.database import init_db; asyncio.run(init_db(
 | Telegram bot | `main.py` | Receives messages, calls `Orchestrator`, sends HTML replies |
 | Web dashboard | `server.py` | FastAPI + HTMX UI; reads same `db/state.db` |
 
-Both processes share `db/state.db` (SQLite). The web server also fires a background `IBKRAgent.tickle_loop()` to keep the IBKR CP Gateway session alive.
+Both share `db/state.db` (SQLite). `start.py` orchestrates all services and handles Ctrl+C shutdown.
 
 ### Message flow (Telegram)
 
@@ -60,28 +54,25 @@ Both processes share `db/state.db` (SQLite). The web server also fires a backgro
 Telegram message
   → main.py._handle_text()
   → Orchestrator.process()
-  → _try_watchlist_fast_path()        [regex — no LLM]  → WatchlistAgent
+  → _try_watchlist_fast_path()       [regex — no LLM]  → WatchlistAgent
   → if len(text) > LONG_MESSAGE_THRESHOLD (300):
-      → SummarizerAgent               [LLM — extracts 3 bullet points]
-  → memory.get_context(chat_id)       [load summary + recent 6 turns]
-  → _route_with_llm(working_text)
-      → _build_calls(text)            [regex routing]
-          options keywords present?   → OptionsResearchAgent only
-          ticker(s) present?          → StockResearchAgent + FundamentalsAgent (parallel)
-          no match?                   → _general_reply()  [LLM fallback for general questions]
+      → SummarizerAgent              [LLM]
+  → memory.get_context(chat_id)
+  → _build_calls(text)               [regex routing]
+      options keywords?              → OptionsResearchAgent only
+      ticker(s) present?             → StockResearchAgent + FundamentalsAgent (parallel)
+      no match?                      → _general_reply() [LLM fallback]
   → asyncio.gather(*agent_calls)
-  → "\n\n".join(outputs)
-  → memory.save_turn()                [then compress_if_needed()]
-  → TelegramSender.reply()            [HTML parse mode]
+  → memory.save_turn()
+  → TelegramSender.reply()           [HTML parse mode]
 ```
 
 ### Routing rules (orchestrator.py)
 
-- Ticker detection runs on `text.upper()` to catch lowercase input.
-- `_SKIP_WORDS` contains ~40 options/analysis terms (CALL, PUT, BULL, BEAR, SPREAD, OTM, ATM, DTE, …) that are **not** tickers — always extend this set when adding new keyword routes to avoid false positive dispatch.
-- When options keywords are detected, **only** `OptionsResearchAgent` is dispatched (skip stock/fundamentals to avoid mixing LLM garbage with clean HTML).
-- `_general_reply` falls back without conversation history if LM Studio returns 400 (corrupted memory guard).
-- `TELEGRAM_CHANNEL_ID` (comma-separated) in `.env` restricts which chats the bot responds to; empty = all chats.
+- Ticker detection runs on `text.upper()`. `_SKIP_WORDS` (~40 entries) prevents false positives — always extend when adding new keyword routes.
+- When options keywords are detected, **only** `OptionsResearchAgent` is dispatched.
+- `_general_reply` falls back without history if LM Studio returns 400.
+- `TELEGRAM_CHANNEL_ID` (comma-separated) in `.env` restricts which chats the bot responds to.
 
 ### Agent contract
 
@@ -93,94 +84,140 @@ Every agent returns `AgentResult` (TypedDict in `agents/base_agent.py`):
  "metadata": dict}
 ```
 
-`output` is always Telegram HTML (`<b>`, `<i>`, `<code>`, `<pre>` tags). The same HTML renders correctly in the browser because those tags are valid HTML.
+`output` is always Telegram HTML (`<b>`, `<i>`, `<code>`, `<pre>` tags). Use `<br>` for explicit line breaks — `\n` collapses in browser HTML outside `<pre>`. Both `\n` and `<br>` work in Telegram HTML mode. Use `<pre>` (block) not `<code>` (inline) when section separation matters.
 
 ### LLM situation
 
-The local model (via LM Studio) frequently outputs `?????` garbage. Both `StockResearchAgent` and `FundamentalsAgent` guard against this:
+Local model (LM Studio) frequently outputs `?????` garbage. `StockResearchAgent` and `FundamentalsAgent` guard against this with a `q_ratio` check and fall back to deterministic text.
 
-```python
-q_ratio = raw.count("?") / max(len(raw), 1)
-if not raw or q_ratio > 0.3:
-    # fall back to deterministic rule-based text
-```
+`OptionsResearchAgent`, `UIResearcherAgent`, `UITestingAgent` — **zero LLM dependency**.
 
-`OptionsResearchAgent`, `UIResearcherAgent`, `UITestingAgent`, and `IBKRAgent` have **zero LLM dependency** — pure data + math. `ANTHROPIC_API_KEY` is already in `.env` for future Claude API swap.
+`ANTHROPIC_API_KEY` is in `.env`. Set `MCP_LLM_PROVIDER=anthropic` to switch all MCP servers to Claude.
 
-### Options agents — two exist, one is active
+### MCP server layer
 
-`agents/options_agent.py` (`OptionsAgent`) — legacy agent: ATM-based chain table + simple spread charts. Registered in `_dispatch` as `"run_options_analysis"` but **never dispatched** by `_build_calls`. Still functional if called directly.
+13 independent MCP servers in `mcp_servers/`. Claude Code auto-starts them via `.claude/settings.json`. Each server:
+- Uses `FastMCP` with `instructions=` (not `description=`) for the server-level string
+- Has its own per-agent SQLite DB under `db/agents/<slug>.db`
+- Gets its LLM via `mcp_servers/llm.py → get_llm_client()` — never import `anthropic` directly
+- Calls `_llm.complete(system, user, max_tokens)` — provider-agnostic
 
-`agents/options_research_agent.py` (`OptionsResearchAgent`) — **active agent**, dispatched for all options keywords. No LLM calls — only yfinance + Black-Scholes:
+To add a new MCP server: create `mcp_servers/<slug>/server.py`, add to `mcp_servers/registry.py`, register in `.claude/settings.json`.
 
-1. `get_options_chain(ticker)` → fetches calls/puts for 4 expirations + 52-week rolling HV
-2. `ivr_rank(current_iv, hv_series)` from `tools/options_math.py`
-3. `_generate_strategies()` → produces **vertical spreads only** (`_is_vertical()` guard):
-   - Generates Narrow + Wide variants per expiration per type
-   - Uses per-leg `impliedVolatility` (not ATM-only) for accurate Greeks
-   - Ranks: best 3 credit verticals (by POP) + best 2 debit verticals (by POP)
-4. Output includes `output_html` saved to `options_research_memory` for instant web history replay
+**Server listing:**
 
-`tools/options_math.py` — pure math module: `bs_delta`, `bs_theta_daily`, `pop_credit_spread`, `pop_debit_spread`, `p50` (tastytrade-style: POP + 32% of remaining), `ivr_rank`, `expected_move`.
+| Slug | Tools |
+|---|---|
+| `stock_research` | analyze_stock, get_price_snapshot, recall_analyses |
+| `fundamentals` | get_company_fundamentals, compare_companies, recall_fundamentals |
+| `options_research` | research_options, get_options_chain_data, calculate_iv_rank, recall_research |
+| `watchlist` | add_ticker, remove_ticker, list_watchlist, get_watchlist_digest |
+| `summarizer` | summarize_text, extract_financial_entities, classify_market_sentiment |
+| `heartbeat` | check_all_agents, check_agent, get_health_report, get_health_history |
+| `tester` | run_all_tests, test_agent, test_web_api, get_test_report |
+| `ibkr_session` | get_connection_status, list_accounts, get_account_summary, get_session_log |
+| `ibkr_positions` | get_open_positions, get_live_pnl, get_portfolio_summary, get_allocation |
+| `ibkr_orders` | place_spread, get_risk_briefing, cancel_open_order, get_live_orders, get_order_history |
+| `ibkr_market_data` | get_stock_conid, get_option_contract_conid, get_market_snapshot, get_option_chain, search_contract, clear_conid_cache |
 
-### Conversation memory (db/memory.py)
+### IBKR integration (ib_insync TWS socket)
 
-`MemoryManager` keeps per-chat context across turns:
+All IBKR functionality goes through **IB Gateway** (TWS socket, port 4002 paper / 4001 live) via `ib_insync`. The CP Gateway (REST, port 5000) has been removed.
 
-- Stores raw turns in `conversation_turns`; compresses into a summary when count exceeds 16
-- After compression: keeps the most recent 6 turns raw, deletes the rest, saves LLM summary to `conversation_summaries`
-- Periodic sweep every 30 min (`_periodic_compression` task in `main.py`) catches any chats that didn't auto-compress
-- `get_context()` returns `[summary_message, recent_turns...]` ready to prepend to any LLM call
+**Connection helpers** — `tools/ibkr_tws.py → connect_ib(client_id)`:
+- Returns a cached `IB` instance keyed by `(client_id, id(event_loop))` — prevents cross-loop reuse between uvicorn and test scripts
+- Default timeout 20s (paper accounts are slow)
+- Client IDs 1–5 reserved: SESSION=1, POSITIONS=2, ORDERS=3, MARKET_DATA=4, OPTIONS_RESEARCH=5
 
-### Web UI (server.py)
+**Python 3.14 / eventkit fix** — `eventkit/util.py` is patched in the venv:
+- `main_event_loop` is a `_DynamicLoopProxy` that always routes to the current running loop
+- `register_event_loop(loop)` must be called at server startup (already in `server.py`) so ib_insync reader threads can schedule callbacks back to uvicorn's loop
+- `asyncio.set_event_loop(loop)` also called at startup for non-async thread compatibility
 
-HTMX-powered — routes return HTML fragments, not JSON:
+**IB Gateway setup:**
+- Must be running (`C:\Jts\ibgateway\1039\ibgateway.exe`) and logged in
+- API enabled: Configure → Settings → API → Enable ActiveX and Socket Clients, port 4002
+- "Allow connections from localhost only" checked — suppresses per-connection dialog
+- `TrustedIPs=127.0.0.1,10.5.0.2` in `C:\Jts\ibgateway\1039\jts.ini`
 
-- `POST /search` returns `<div class="result-wrap">…</div>` + `<div id="history-list" hx-swap-oob="true">…</div>` in one response
-- Three colour themes (🌙/💚/🟡) stored in `localStorage`, applied as body CSS class
-- `enhanceOutput()` JS runs on `htmx:afterSwap`: colours `+$` green, `-$` red, `%` yellow; highlights `⭐` and `◀ATM` rows with left-border spans inside `<pre>` blocks
-- Mobile breakpoint at 660px: sidebar becomes a slide-in drawer (`position:fixed`, toggled by `☰` hamburger)
+**Reuters Fundamentals (error 10358)** — not available on demo account `DUM941592`. `get_fundamentals()` tries `reqFundamentalDataAsync("ReportSnapshot")` first; falls back to Yahoo Finance. Auto-uses IB on live accounts with Reuters subscription.
 
-### IBKRAgent (agents/ibkr_agent.py)
+**Spread construction:** `make_vertical_spread()` builds a BAG combo contract from two `ComboLeg` objects. Credit = SELL short_conid, BUY long_conid. Debit = reversed.
 
-Connects to the CP Gateway at `https://localhost:5000` (self-signed cert, `verify=False`).
+### Options research agent (`agents/options_research_agent.py`)
 
-Key facts to keep correct:
-- **USD spread conid = `28812380`** (permanent, hardcoded by IBKR, never changes)
-- `conidex` format: `"28812380;;;{sell_conid}/-1,{buy_conid}/1"` — negative ratio = sell that leg
-- Three-step contract lookup required: `secdef/search` → `secdef/strikes` (warms session) → `secdef/info`; results cached in `ibkr_conid_cache`
-- Order placement is two-step: first POST may return `{"id": …, "message": […]}` requiring a `POST /iserver/reply/{id} {"confirmed": true}` before the order is accepted
-- Session times out in ~5-6 min; `tickle_loop()` runs every 55s in background
+**Active agent** for all options keywords. No LLM — pure data + math:
 
-### Database schema (db/state.db)
+1. `get_options_chain(ticker)` → tries IB Gateway first, falls back to yfinance
+2. Filters chains by `term` param: `short` ≤ 45 DTE, `long` > 21 DTE (furthest chains)
+3. `_generate_strategies()` → vertical spreads only, ranked by POP: best 3 credit + best 2 debit
+4. Output HTML saved to `options_research_memory` for web history replay
 
-New tables are added in `db/database.py → init_db()` using `CREATE TABLE IF NOT EXISTS`. Schema changes to existing tables use `ALTER TABLE ADD COLUMN` wrapped in try/except (non-destructive migration pattern). Tables:
+**Output structure** (parts joined with `\n`):
+1. Header — price, outlook, IVR, term label (`📅 Short Term` / `📆 Long Term`)
+2. Expirations selector `<pre>`
+3. Chain table `<pre>`
+4. 5 Strategies Compared `<pre>`
+5. 🏆 Recommended header — POP, net, ROC (bullets with `<br>`)
+6. "Trade Structure" heading + `_fmt_detail_card()`:
+   - The Legs (`<br>` per leg), How it works (`<br>` per point)
+   - Key Numbers `<pre>` (block — use `<pre>` not `<code>` to ensure section separation)
+   - Payoff at Expiration `[expiry date]` `<pre>`
+7. P&L chart `<pre>`
+8. Place Order button (HTMX form → `/api/place-order`)
 
-- `messages`, `agent_logs` — audit logs
-- `watchlist` — persisted tickers
-- `conversation_turns`, `conversation_summaries` — per-chat LLM memory with auto-compression
-- `options_research_memory` — options research history including `output_html` for instant web replay
-- `ui_research_memory` — UIResearcherAgent findings (5 seeded, all ✅ implemented)
-- `ui_test_results` — UITestingAgent results with pass/fail + duration_ms
-- `ibkr_conid_cache` — option conid cache keyed by (symbol, expiry, right, strike)
-- `ibkr_orders` — order history with ibkr_order_id and status
+`tools/options_math.py` — pure math: `bs_delta`, `bs_theta_daily`, `pop_credit_spread`, `pop_debit_spread`, `p50`, `ivr_rank`, `expected_move`.
 
-### Environment variables (.env)
+### Fundamentals data flow
+
+`tools/market_data.get_fundamentals(ticker)`:
+1. Tries IB Gateway → `reqFundamentalDataAsync("ReportSnapshot")` → `_parse_ibkr_fundamentals_xml()`
+2. Falls back to Yahoo Finance → `_fetch_fundamentals_sync()`
+3. Return dict always includes `source` and `source_url` — displayed in web fundamentals card footer
+
+### Web UI (`server.py`)
+
+FastAPI + HTMX — routes return HTML fragments:
+- `POST /search` → `asyncio.gather(OptionsResearchAgent.run(), _fundamentals_card())` — fundamentals in parallel
+- `GET /positions` → positions page; `/api/positions-fragment` — 60s HTMX auto-refresh
+- `POST /api/place-order` → calls `ibkr_orders.place_spread()` via ib_insync
+- `GET /ibkr` → session status + order history
+- `_page(history, active_tab, body_override, show_search=True)` — base template; `show_search=False` hides ticker search bar
+
+**Positions tab columns:** Symbol, Strategy, Strikes, Expiry, DTE badge (🟢>21d / 🟡7–21d / 🔴<7d⚠), Max Profit, Max Loss, Breakeven, Qty, Net, Status. "Show cancelled" checkbox is client-side JS (`data-cancelled` attr on rows).
+
+**Breakeven formula:**
+- Credit + Put: `short_strike - abs(net)` | Credit + Call: `short_strike + abs(net)`
+- Debit + Put: `max(short, long) - abs(net)` | Debit + Call: `min(short, long) + abs(net)`
+
+Three colour themes stored in `localStorage`. `enhanceOutput()` JS runs on `htmx:afterSwap`.
+
+### Database schema (`db/state.db`)
+
+New tables via `CREATE TABLE IF NOT EXISTS` in `db/database.py → init_db()`. Schema changes use `ALTER TABLE ADD COLUMN` in try/except. Key tables:
+- `options_research_memory` — includes `output_html` for instant web replay
+- `ibkr_conid_cache` — option conids keyed by (symbol, expiry, right, strike)
+- `ibkr_orders` — order history; `db/database.py → order_history()` is the canonical read function
+- `conversation_turns`, `conversation_summaries` — per-chat memory with auto-compression at 16 turns
+
+### Environment variables (`.env`)
 
 | Key | Default | Notes |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | Required |
-| `TELEGRAM_CHANNEL_ID` | `""` | Comma-separated allowed chat IDs; empty = all chats |
-| `LMSTUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio OpenAI-compat API |
+| `TELEGRAM_CHANNEL_ID` | `""` | Comma-separated allowed chat IDs; empty = all |
+| `LMSTUDIO_BASE_URL` | `http://localhost:1234/v1` | |
 | `LLM_MODEL` | `local-model` | Must match model loaded in LM Studio |
-| `LLM_MAX_TOKENS` | `2048` | Max tokens for agent LLM calls |
-| `LLM_ORCHESTRATOR_MAX_TOKENS` | `1024` | Max tokens for orchestrator/routing LLM calls |
-| `LONG_MESSAGE_THRESHOLD` | `300` | Messages longer than this are auto-summarized before routing |
-| `ANTHROPIC_API_KEY` | — | Set; ready for Claude API swap |
-| `WEB_SERVER_URL` | `http://localhost:8000` | Auto-overwritten at bot startup by cloudflared tunnel URL |
+| `ANTHROPIC_API_KEY` | — | Set; use `MCP_LLM_PROVIDER=anthropic` to activate |
+| `MCP_LLM_PROVIDER` | `lmstudio` | `lmstudio` \| `anthropic` \| `openai` |
+| `MCP_LLM_MODEL` | (falls back to `LLM_MODEL`) | |
+| `POLYGON_API_KEY` | — | Optional; real-time quotes over yfinance |
+| `IBKR_PAPER_TRADING` | `true` | Set `false` for live (real money) |
+| `IBKR_TWS_HOST` | `127.0.0.1` | |
+| `IBKR_TWS_PORT` | `4002` (paper) / `4001` (live) | IB Gateway socket port |
+| `IBKR_GATEWAY_EXE` | `C:\Jts\ibgateway\1039\ibgateway.exe` | |
 | `DB_PATH` | `db/state.db` | |
-| `POLYGON_API_KEY` | — | Optional; enables real-time quotes over yfinance |
 
 ### WSL2 / networking
 
-This runs on WSL2 with `networkingMode=mirrored` (`~/.wslconfig`). `localhost` in WSL equals `localhost` on Windows — no proxy needed. The `lms` alias in `~/.bashrc` calls `/mnt/c/Users/User/AppData/Local/Programs/LM Studio/resources/app/.webpack/lms.exe` directly via WSL interop. cloudflared is installed at `~/.local/bin/cloudflared` and is auto-started by `main.py` on bot startup, setting `WEB_SERVER_URL` to the live public tunnel URL.
+Runs on WSL2 with `networkingMode=mirrored` — `localhost` in WSL equals `localhost` on Windows. cloudflared auto-started by `main.py`, sets `WEB_SERVER_URL` to the live public tunnel URL.

@@ -1,22 +1,23 @@
 """
-IBKR Market Data MCP Server
+IBKR Market Data MCP Server  (ib_insync / TWS socket)
 
-Contract lookup, live market snapshots, and option chain discovery via CP Gateway.
-Conid results are cached in db/state.db to avoid repeated API round-trips.
+Contract lookup, live quotes, option chain discovery via IB Gateway.
+Conid results cached in db/state.db.
 
 Tools:
-  get_stock_conid(symbol)              → underlying stock/ETF conid
-  get_option_conid(symbol, expiry, right, strike) → option contract conid (cached)
-  get_market_snapshot(conids)          → live bid/ask/last/volume for 1+ conids
-  get_option_strikes(symbol, month)    → available strikes for a symbol+month
-  search_contract(query)               → fuzzy search for any contract
-  clear_conid_cache(symbol)            → remove cached conids for a symbol
+  get_stock_conid(symbol)                           → qualify stock/ETF
+  get_option_contract_conid(sym, expiry, right, K) → qualify + cache option
+  get_market_snapshot(symbols_csv)                  → live bid/ask/last/Greeks
+  get_option_chain(symbol, expiry)                  → available strikes
+  search_contract(query, sec_type)                  → fuzzy contract search
+  clear_conid_cache(symbol)                         → purge cached conids
 
-Shared data: db/state.db (ibkr_conid_cache table)
-Memory:      db/agents/ibkr_market_data.db
-LLM:         configured via MCP_LLM_PROVIDER / MCP_LLM_MODEL
+Shared: db/state.db (ibkr_conid_cache)
+Memory: db/agents/ibkr_market_data.db
+LLM:    configured via MCP_LLM_PROVIDER / MCP_LLM_MODEL
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -25,45 +26,26 @@ import time
 from datetime import datetime, timezone
 
 import aiosqlite
-import httpx
+from ib_insync import Contract, Index, Option, Stock
 from mcp.server.fastmcp import FastMCP
 from mcp_servers.llm import get_llm_client
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config  # noqa: E402
-from agents.ibkr_agent import (  # noqa: E402
-    auth_status, get_option_conid, get_underlying_conid,
-    _cache_get, _cache_set, _client, _month_code,
+from tools.ibkr_tws import (  # noqa: E402
+    connect_ib, make_option_contract, paper_label,
 )
+from agents.ibkr_agent import _cache_get, _cache_set  # noqa: E402  (reuse SQLite cache)
 
 logger = logging.getLogger(__name__)
 
-_ROOT    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-AGENT_DB = os.path.join(_ROOT, "db", "agents", "ibkr_market_data.db")
-GATEWAY  = "https://localhost:5000/v1/api"
+_ROOT     = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+AGENT_DB  = os.path.join(_ROOT, "db", "agents", "ibkr_market_data.db")
+CLIENT_ID = config.IBKR_CLIENT_ID_MARKET_DATA
 
-_llm = get_llm_client()
+_llm      = get_llm_client()
 _db_ready = False
-
-# IBKR field IDs for market data snapshot
-_FIELDS = {
-    "31":   "last",
-    "84":   "bid",
-    "86":   "ask",
-    "85":   "bid_sz",
-    "88":   "ask_sz",
-    "7762": "volume",
-    "7295": "open",
-    "7296": "high",
-    "7293": "low",
-    "7741": "close",
-    "7644": "iv",
-    "7718": "delta",
-    "7720": "gamma",
-    "7719": "vega",
-    "7721": "theta",
-}
 
 
 def _utcnow() -> str:
@@ -77,12 +59,6 @@ async def _ensure_db() -> None:
     os.makedirs(os.path.dirname(AGENT_DB), exist_ok=True)
     async with aiosqlite.connect(AGENT_DB) as db:
         await db.executescript("""
-            CREATE TABLE IF NOT EXISTS snapshot_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp   TEXT NOT NULL,
-                conids      TEXT NOT NULL,
-                response    TEXT
-            );
             CREATE TABLE IF NOT EXISTS call_log (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp   TEXT NOT NULL,
@@ -104,20 +80,11 @@ async def _log_call(tool: str, ms: int, detail: str = "") -> None:
         await db.commit()
 
 
-def _require_auth(s: dict) -> str | None:
-    if s.get("error"):
-        return f"Gateway unreachable: {s['error']}"
-    if not s.get("authenticated"):
-        return "Not authenticated. Open https://localhost:5000 to log in."
-    return None
-
-
 mcp = FastMCP(
     name="ibkr-market-data",
     instructions=(
-        "IBKR contract lookup and live market data via CP Gateway. "
-        "Conid results are cached in SQLite. Provides live snapshots with "
-        "bid/ask/last and Greeks for options."
+        "IBKR contract lookup and live market data via ib_insync TWS socket. "
+        "Conid results cached. Live quotes include bid/ask/last and Greeks for options."
     ),
 )
 
@@ -125,23 +92,26 @@ mcp = FastMCP(
 @mcp.tool()
 async def get_stock_conid(symbol: str) -> str:
     """
-    Look up the conid (contract ID) for a stock or ETF symbol.
-    The conid is required for all other market data and order calls.
+    Qualify a stock/ETF symbol and return its conid from IB Gateway.
+    The conid is required for order placement and market data subscriptions.
     """
     await _ensure_db()
-    t0 = time.monotonic()
-    s  = await auth_status()
-    if err := _require_auth(s):
-        return err
-
+    t0     = time.monotonic()
     symbol = symbol.strip().upper()
     try:
-        conid = await get_underlying_conid(symbol)
-        ms    = int((time.monotonic() - t0) * 1000)
+        ib       = await connect_ib(CLIENT_ID)
+        contract = Stock(symbol, "SMART", "USD")
+        qualified = await ib.qualifyContractsAsync(contract)
+        ms = int((time.monotonic() - t0) * 1000)
         await _log_call("get_stock_conid", ms, symbol)
-        return f"{symbol} conid: {conid}  ({ms}ms)"
+        if not qualified:
+            return f"Could not qualify {symbol}."
+        c = qualified[0]
+        return f"{symbol} ({c.primaryExchange}): conid={c.conId}  ({ms}ms)"
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
     except Exception as exc:
-        return f"Lookup failed for {symbol}: {exc}"
+        return f"Error: {exc}"
 
 
 @mcp.tool()
@@ -153,198 +123,178 @@ async def get_option_contract_conid(
     exchange: str = "SMART",
 ) -> str:
     """
-    Look up the conid for a specific option contract.
-    Results are cached — subsequent calls for the same contract return instantly.
-
-    symbol:   Underlying symbol (e.g. AAPL)
-    expiry:   Expiration date YYYY-MM-DD
-    right:    P (put) or C (call)
-    strike:   Strike price as a number
-    exchange: Routing exchange (default SMART)
+    Look up and cache the conid for a specific option contract.
+    expiry: YYYY-MM-DD  right: P or C  strike: numeric
+    Cached results return instantly.
     """
     await _ensure_db()
-    t0 = time.monotonic()
-    s  = await auth_status()
-    if err := _require_auth(s):
-        return err
-
+    t0     = time.monotonic()
     symbol = symbol.strip().upper()
     right  = right.strip().upper()
+    expiry_ib = expiry.replace("-", "")
 
     cached = await _cache_get(symbol, expiry, right, strike)
     if cached:
         ms = int((time.monotonic() - t0) * 1000)
         await _log_call("get_option_contract_conid", ms, f"{symbol} {right}{strike} {expiry} [cached]")
-        return f"{symbol} {right}{strike:.0f} {expiry} → conid: {cached}  (cached, {ms}ms)"
+        return f"{symbol} {right}{strike:.0f} {expiry} → conid={cached}  (cached, {ms}ms)"
 
     try:
-        conid = await get_option_conid(symbol, expiry, right, strike, exchange)
-        ms    = int((time.monotonic() - t0) * 1000)
+        ib       = await connect_ib(CLIENT_ID)
+        contract = make_option_contract(symbol, expiry_ib, right, strike, exchange)
+        qualified = await ib.qualifyContractsAsync(contract)
+        ms = int((time.monotonic() - t0) * 1000)
         await _log_call("get_option_contract_conid", ms, f"{symbol} {right}{strike} {expiry}")
-        return f"{symbol} {right}{strike:.0f} {expiry} → conid: {conid}  ({ms}ms)"
+
+        if not qualified:
+            return f"Could not qualify {symbol} {right}{strike:.0f} {expiry}."
+        conid = qualified[0].conId
+        await _cache_set(symbol, expiry, right, strike, conid)
+        return f"{symbol} {right}{strike:.0f} {expiry} → conid={conid}  ({ms}ms)"
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
     except Exception as exc:
-        return f"Lookup failed: {exc}"
+        return f"Error: {exc}"
 
 
 @mcp.tool()
-async def get_market_snapshot(conids: str) -> str:
+async def get_market_snapshot(symbols_csv: str) -> str:
     """
-    Fetch a live market data snapshot for one or more conids.
-    conids: comma-separated list of conids (e.g. "265598,12345")
-    Returns bid, ask, last, volume, and Greeks for options.
+    Fetch live market data for one or more stock symbols.
+    symbols_csv: comma-separated list e.g. "AAPL,MSFT,SPY"
+    Returns bid, ask, last, volume, and change for each.
 
-    Note: IBKR CP Gateway returns data asynchronously — call twice if
-    fields are missing on the first call (gateway needs to subscribe first).
+    Note: IB Gateway may take a moment to subscribe — call twice if values are missing.
     """
     await _ensure_db()
-    t0 = time.monotonic()
-    s  = await auth_status()
-    if err := _require_auth(s):
-        return err
+    t0      = time.monotonic()
+    symbols = [s.strip().upper() for s in symbols_csv.split(",") if s.strip()]
 
-    fields_param = ",".join(_FIELDS.keys())
     try:
-        async with _client() as c:
-            r = await c.get(
-                "/iserver/marketdata/snapshot",
-                params={"conids": conids.replace(" ", ""), "fields": fields_param},
+        ib        = await connect_ib(CLIENT_ID)
+        contracts = [Stock(s, "SMART", "USD") for s in symbols]
+        qualified = await ib.qualifyContractsAsync(*contracts)
+
+        tickers = [ib.reqMktData(c, "", False, False) for c in qualified]
+        await asyncio.sleep(2)  # allow data to arrive
+
+        ms = int((time.monotonic() - t0) * 1000)
+        await _log_call("get_market_snapshot", ms, symbols_csv)
+
+        col = 6
+        lines = [f"Market Snapshot  [{paper_label()}]  ({ms}ms)\n",
+                 f"{'Symbol':<{col}} {'Last':>8}  {'Bid':>8}  {'Ask':>8}  {'Volume':>10}  {'Chg%':>7}"]
+        lines.append("─" * 58)
+        for c, t in zip(qualified, tickers):
+            last   = t.last   if t.last   and t.last   > 0 else t.close or 0
+            bid    = t.bid    if t.bid    and t.bid    > 0 else 0
+            ask    = t.ask    if t.ask    and t.ask    > 0 else 0
+            vol    = t.volume if t.volume and t.volume > 0 else 0
+            close  = t.close  if t.close  and t.close  > 0 else last
+            chg_pct = ((last - close) / close * 100) if close and last else 0
+            sign = "+" if chg_pct >= 0 else ""
+            lines.append(
+                f"{c.symbol:<{col}} ${last:>7.2f}  ${bid:>7.2f}  ${ask:>7.2f}  "
+                f"{int(vol):>10,}  {sign}{chg_pct:>6.2f}%"
             )
-            r.raise_for_status()
-            data = r.json()
+
+        # Cancel subscriptions
+        for c in qualified:
+            ib.cancelMktData(c)
+
+        return "\n".join(lines)
+
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
     except Exception as exc:
-        return f"Snapshot failed: {exc}"
-
-    ms = int((time.monotonic() - t0) * 1000)
-    await _log_call("get_market_snapshot", ms, conids[:80])
-
-    # Log raw response
-    async with aiosqlite.connect(AGENT_DB) as db:
-        await db.execute(
-            "INSERT INTO snapshot_log (timestamp, conids, response) VALUES (?,?,?)",
-            (_utcnow(), conids, json.dumps(data)[:2000]),
-        )
-        await db.commit()
-
-    if not data:
-        return f"No snapshot data returned for conids: {conids}. Try calling again — gateway may need a moment to subscribe."
-
-    col = 12
-    lines = [f"Market Snapshot  ({ms}ms)\n",
-             f"{'Field':<{col}} " + "  ".join(f"{c[:10]:<10}" for c in conids.split(",")[:5])]
-    lines.append("─" * (col + 14 * len(conids.split(",")[:5])))
-
-    rows_by_field: dict[str, list] = {name: [] for name in _FIELDS.values()}
-    for item in data:
-        for fid, fname in _FIELDS.items():
-            val = item.get(fid) or item.get(fname) or "—"
-            rows_by_field[fname].append(str(val)[:10])
-
-    for fname, values in rows_by_field.items():
-        if any(v != "—" for v in values):
-            lines.append(f"{fname:<{col}} " + "  ".join(f"{v:<10}" for v in values[:5]))
-
-    return "\n".join(lines)
+        return f"Error: {exc}"
 
 
 @mcp.tool()
-async def get_option_strikes(symbol: str, month: str) -> str:
+async def get_option_chain(symbol: str, expiry: str) -> str:
     """
-    Fetch available option strikes for a symbol and expiry month.
+    Fetch available option strikes for a symbol and expiry date.
     symbol: underlying (e.g. AAPL)
-    month:  expiry month as MMMYY (e.g. JUN26) or YYYY-MM-DD (converted automatically)
+    expiry: YYYY-MM-DD
     """
     await _ensure_db()
-    t0 = time.monotonic()
-    s  = await auth_status()
-    if err := _require_auth(s):
-        return err
-
-    symbol = symbol.strip().upper()
-    if "-" in month:
-        month = _month_code(month)
+    t0        = time.monotonic()
+    symbol    = symbol.strip().upper()
+    expiry_ib = expiry.replace("-", "")
 
     try:
-        conid = await get_underlying_conid(symbol)
-        async with _client() as c:
-            r = await c.get(
-                "/iserver/secdef/strikes",
-                params={"conid": conid, "sectype": "OPT", "month": month, "exchange": "SMART"},
+        ib       = await connect_ib(CLIENT_ID)
+        und      = Stock(symbol, "SMART", "USD")
+        qualified = await ib.qualifyContractsAsync(und)
+        if not qualified:
+            return f"Could not qualify {symbol}."
+
+        chains = await ib.reqSecDefOptParamsAsync(
+            symbol, "", qualified[0].secType, qualified[0].conId
+        )
+        ms = int((time.monotonic() - t0) * 1000)
+        await _log_call("get_option_chain", ms, f"{symbol} {expiry}")
+
+        # Find the chain matching the requested expiry
+        target = next((c for c in chains if expiry_ib in c.expirations), None)
+        if not target:
+            available = sorted({e for c in chains for e in c.expirations})[:8]
+            return (
+                f"Expiry {expiry} not found for {symbol}.\n"
+                f"Available: {', '.join(available[:8])}"
             )
-            r.raise_for_status()
-            data = r.json()
+
+        strikes = sorted(target.strikes)
+        lines = [f"Option Chain — {symbol} {expiry}  ({len(strikes)} strikes, {ms}ms)\n",
+                 f"{'Strike':>8}  Exchange: {target.exchange}"]
+        lines.append("─" * 25)
+        for s in strikes:
+            lines.append(f"  ${s:>8.2f}")
+        return "\n".join(lines)
+
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
     except Exception as exc:
-        return f"Strike fetch failed: {exc}"
-
-    ms = int((time.monotonic() - t0) * 1000)
-    await _log_call("get_option_strikes", ms, f"{symbol} {month}")
-
-    calls = data.get("call", [])
-    puts  = data.get("put",  [])
-    all_s = sorted(set(calls) | set(puts))
-
-    if not all_s:
-        return f"No strikes found for {symbol} {month}."
-
-    lines = [f"Option Strikes — {symbol} {month}  ({len(all_s)} strikes, {ms}ms)\n",
-             f"{'Strike':>8}  {'Call':>6}  {'Put':>6}"]
-    lines.append("─" * 26)
-    for s in all_s:
-        c_mark = "✓" if s in calls else "—"
-        p_mark = "✓" if s in puts  else "—"
-        lines.append(f"${s:>7.0f}  {c_mark:>6}  {p_mark:>6}")
-    return "\n".join(lines)
+        return f"Error: {exc}"
 
 
 @mcp.tool()
 async def search_contract(query: str, sec_type: str = "STK") -> str:
     """
-    Search for any contract by name or symbol.
-    query:    company name or ticker (e.g. "Apple" or "AAPL")
-    sec_type: STK, OPT, FUT, CASH, IND, etc. (default STK)
+    Search for any contract by symbol or company name.
+    sec_type: STK, OPT, FUT, CASH, IND, etc.
     """
     await _ensure_db()
     t0 = time.monotonic()
-    s  = await auth_status()
-    if err := _require_auth(s):
-        return err
-
     try:
-        async with _client() as c:
-            r = await c.post(
-                "/iserver/secdef/search",
-                json={"symbol": query, "name": True, "secType": sec_type},
+        ib      = await connect_ib(CLIENT_ID)
+        results = await ib.reqMatchingSymbolsAsync(query)
+        ms      = int((time.monotonic() - t0) * 1000)
+        await _log_call("search_contract", ms, query)
+
+        filtered = [r for r in results if r.contract.secType == sec_type.upper()][:15]
+        if not filtered:
+            return f"No {sec_type} results for '{query}'."
+
+        lines = [f"Contract Search: '{query}' ({sec_type})  {len(filtered)} results  ({ms}ms)\n",
+                 f"{'Conid':<12} {'Symbol':<10} {'Company':<35} {'Exchange':<10}"]
+        lines.append("─" * 72)
+        for r in filtered:
+            c = r.contract
+            lines.append(
+                f"{c.conId:<12} {c.symbol:<10} "
+                f"{str(r.contractDescription or '')[:34]:<35} {c.primaryExch or c.exchange:<10}"
             )
-            r.raise_for_status()
-            results = r.json()
+        return "\n".join(lines)
+    except ConnectionError as exc:
+        return f"Not connected: {exc}"
     except Exception as exc:
-        return f"Search failed: {exc}"
-
-    ms = int((time.monotonic() - t0) * 1000)
-    await _log_call("search_contract", ms, query)
-
-    if not results:
-        return f"No results for '{query}' ({sec_type})."
-
-    lines = [f"Contract Search: '{query}' ({sec_type})  {len(results)} results  ({ms}ms)\n",
-             f"{'Conid':<12} {'Symbol':<10} {'Company':<35} {'Exchange':<10} Type"]
-    lines.append("─" * 80)
-    for r in results[:15]:
-        lines.append(
-            f"{str(r.get('conid','?')):<12} "
-            f"{r.get('symbol','?'):<10} "
-            f"{str(r.get('companyName', r.get('description','?')))[:34]:<35} "
-            f"{r.get('primaryExch', r.get('exchange','?')):<10} "
-            f"{r.get('secType','?')}"
-        )
-    return "\n".join(lines)
+        return f"Error: {exc}"
 
 
 @mcp.tool()
 async def clear_conid_cache(symbol: str) -> str:
-    """
-    Remove all cached option conids for a symbol from the local DB.
-    Useful when option chains roll to new strikes/expirations.
-    """
+    """Remove all cached option conids for a symbol."""
     await _ensure_db()
     symbol = symbol.strip().upper()
     async with aiosqlite.connect(config.DB_PATH) as db:

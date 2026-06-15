@@ -22,7 +22,6 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import config
-from agents.ibkr_agent import IBKRAgent
 from agents.options_research_agent import OptionsResearchAgent
 from agents.ui_researcher_agent import UIResearcherAgent
 from agents.ui_testing_agent import UITestingAgent
@@ -31,7 +30,6 @@ from db.database import init_db
 logger = logging.getLogger(__name__)
 app       = FastAPI(title="Financial Research Agent")
 _ui_agent = UIResearcherAgent()
-_ibkr     = IBKRAgent()
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -40,8 +38,13 @@ _ibkr     = IBKRAgent()
 async def startup() -> None:
     await init_db()
     await _ui_agent.ensure_seeded()
-    # Start IBKR tickle loop in background (no-op if gateway not running)
-    asyncio.create_task(_ibkr.tickle_loop())
+    # Python 3.14 compatibility: set the running loop in the policy so that
+    # asyncio.get_event_loop() works from non-async contexts (ib_insync threads).
+    import asyncio as _aio
+    _loop = _aio.get_running_loop()
+    _aio.set_event_loop(_loop)
+    from eventkit.util import register_event_loop
+    register_event_loop(_loop)
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -109,20 +112,24 @@ async def index() -> HTMLResponse:
 
 @app.post("/search", response_class=HTMLResponse)
 async def search(
-    ticker: str  = Form(...),
+    ticker:  str = Form(...),
     outlook: str = Form("neutral"),
+    term:    str = Form("short"),
 ) -> HTMLResponse:
     ticker = ticker.strip().upper()
     if not ticker:
         return HTMLResponse('<p class="error">Ticker is required.</p>')
 
-    agent  = OptionsResearchAgent()
-    result = await agent.run({"ticker": ticker, "outlook": outlook, "chat_id": "web"})
+    agent = OptionsResearchAgent()
+    result, fund_card = await asyncio.gather(
+        agent.run({"ticker": ticker, "outlook": outlook, "term": term, "chat_id": "web"}),
+        _fundamentals_card(ticker),
+    )
     history = await _get_history()
     new_id  = history[0]["id"] if history else None
 
-    # Results panel + OOB sidebar update in one response
-    results_html = f'<div class="result-wrap">{result["output"]}</div>'
+    body = fund_card + result["output"]
+    results_html = f'<div class="result-wrap">{body}</div>'
     sidebar_html = (f'<div id="history-list" hx-swap-oob="true">'
                     f'{_sidebar_items(history, active_id=new_id)}</div>')
     return HTMLResponse(results_html + sidebar_html)
@@ -160,16 +167,18 @@ async def mark_implemented(finding_id: int) -> HTMLResponse:
 
 @app.get("/ibkr", response_class=HTMLResponse)
 async def ibkr_page() -> HTMLResponse:
+    from mcp_servers.ibkr_session.server import get_connection_status
+    from mcp_servers.ibkr_orders.server import get_order_history
     history = await _get_history()
-    status  = await _ibkr.status()
-    orders  = await _ibkr.orders_summary()
+    status  = await get_connection_status()
+    orders  = await get_order_history(limit=10)
     body    = (f'<div class="result-wrap" style="max-width:760px">'
-               f'{status}<br><br>{orders}</div>')
+               f'<pre>{status}</pre><br>{orders}</div>')
     return HTMLResponse(_page(history, active_tab="ibkr", body_override=body))
 
 
-@app.post("/ibkr/execute", response_class=HTMLResponse)
-async def ibkr_execute(
+@app.post("/api/place-order", response_class=HTMLResponse)
+async def api_place_order(
     ticker:       str   = Form(...),
     short_strike: float = Form(...),
     long_strike:  float = Form(...),
@@ -177,23 +186,59 @@ async def ibkr_execute(
     expiry:       str   = Form(...),
     net_price:    float = Form(...),
     quantity:     int   = Form(1),
-    tif:          str   = Form("DAY"),
 ) -> HTMLResponse:
-    result = await _ibkr.execute_spread(
+    from mcp_servers.ibkr_orders.server import place_spread
+    result = await place_spread(
         ticker=ticker.upper(), short_strike=short_strike,
         long_strike=long_strike, right=right, expiry=expiry,
-        net_price=net_price, quantity=quantity, tif=tif,
+        net_price=net_price, quantity=quantity,
     )
-    orders = await _ibkr.orders_summary()
-    return HTMLResponse(
-        f'<div class="result-wrap" style="max-width:760px">{result}<br><br>{orders}</div>'
-    )
+    ok = "Not connected" not in result and "failed" not in result.lower() and "Error" not in result
+    cls = "order-ok" if ok else "order-err"
+    return HTMLResponse(f'<div class="order-confirmation {cls}"><pre>{result}</pre></div>')
+
+
+@app.post("/api/cancel-order", response_class=HTMLResponse)
+async def api_cancel_order(order_id: str = Form(...)) -> Response:
+    from mcp_servers.ibkr_orders.server import cancel_open_order
+    from db.database import delete_order_by_ibkr_id
+    try:
+        result = await cancel_open_order(int(order_id))
+        if "not found" in result.lower():
+            await delete_order_by_ibkr_id(order_id)
+            return Response(
+                content="",
+                media_type="text/html",
+                headers={
+                    "HX-Reswap": "outerHTML",
+                    "HX-Retarget": f"#order-row-{order_id}",
+                },
+            )
+        ok  = "failed" not in result.lower()
+        cls = "cancel-ok" if ok else "cancel-err"
+    except Exception as exc:
+        result = f"Error: {exc}"
+        cls = "cancel-err"
+    return HTMLResponse(f'<span class="cancel-result {cls}">{result}</span>')
+
+
+@app.get("/positions", response_class=HTMLResponse)
+async def positions_page() -> HTMLResponse:
+    history = await _get_history()
+    body = '<div id="positions-content" hx-get="/api/positions-fragment" hx-trigger="load, every 60s" hx-swap="innerHTML"><div class="placeholder"><div class="icon">⏳</div><p>Loading positions…</p></div></div>'
+    return HTMLResponse(_page(history, active_tab="positions", body_override=body, show_search=False))
+
+
+@app.get("/api/positions-fragment", response_class=HTMLResponse)
+async def positions_fragment() -> HTMLResponse:
+    return HTMLResponse(await _build_positions_html())
 
 
 @app.get("/ibkr/positions", response_class=HTMLResponse)
 async def ibkr_positions() -> HTMLResponse:
-    html = await _ibkr.positions_summary()
-    return HTMLResponse(f'<div class="result-wrap">{html}</div>')
+    from mcp_servers.ibkr_positions.server import get_portfolio_summary
+    html = await get_portfolio_summary()
+    return HTMLResponse(f'<div class="result-wrap"><pre>{html}</pre></div>')
 
 
 @app.get("/test", response_class=HTMLResponse)
@@ -489,6 +534,186 @@ aside {
 body.light .star-row { background: rgba(184,120,0,0.1); }
 body.light .atm-row  { background: rgba(0,80,208,0.07); }
 
+/* ── Long term button variant ── */
+.btn-long {
+  background: var(--bg3) !important; color: var(--text) !important;
+  border: 1.5px solid var(--border);
+}
+.btn-long:hover { background: var(--bg2) !important; border-color: var(--blue); }
+
+/* ── Fundamentals card ── */
+.fund-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 18px;
+  margin-bottom: 18px;
+}
+.fund-name {
+  font-size: 15px; font-weight: 700; margin-bottom: 10px;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.fund-sub  { font-size: 12px; color: var(--dim); font-weight: 400; }
+.fund-metrics {
+  display: flex; flex-wrap: wrap; gap: 6px 16px;
+}
+.fund-metric {
+  display: flex; flex-direction: column; gap: 1px;
+  font-size: 13px; font-weight: 700; font-family: var(--mono);
+  min-width: 60px;
+}
+.fund-label {
+  font-size: 10px; font-weight: 600; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  font-family: inherit;
+}
+.fund-footer {
+  margin-top: 10px; font-size: 11px; color: var(--dim);
+  border-top: 1px solid var(--border); padding-top: 8px;
+}
+.fund-source {
+  color: var(--dim); text-decoration: none;
+  border-bottom: 1px dotted var(--dim);
+  transition: color var(--ease);
+}
+.fund-source:hover { color: var(--text); }
+
+/* ── Order panel ── */
+.order-panel {
+  margin: 16px 0 8px;
+  padding: 16px 20px;
+  background: var(--bg2);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+}
+.order-panel-label {
+  font-size: 12px; font-weight: 600; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 12px;
+}
+.order-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.qty-label {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; font-weight: 600; color: var(--dim);
+}
+.qty-input {
+  width: 60px; background: var(--bg3);
+  border: 1.5px solid var(--border); border-radius: 7px;
+  color: var(--text); font-size: 14px; font-weight: 700;
+  padding: 6px 8px; outline: none; text-align: center;
+  transition: border-color var(--ease);
+}
+.qty-input:focus { border-color: var(--blue); }
+.order-btn {
+  background: var(--blue) !important; color: #fff !important;
+  font-size: 14px; font-weight: 700; padding: 8px 20px;
+}
+.order-btn:hover { opacity: 0.85; }
+.order-net {
+  font-size: 12px; color: var(--dim); font-family: var(--mono);
+}
+.order-spinner {
+  margin-top: 10px; font-size: 13px; color: var(--dim);
+}
+.order-confirmation {
+  margin-top: 12px; padding: 14px 16px;
+  border-radius: 8px; font-size: 13px;
+}
+.order-ok  { background: rgba(0,200,5,0.08);  border: 1px solid rgba(0,200,5,0.3); }
+.order-err { background: rgba(255,80,0,0.08); border: 1px solid rgba(255,80,0,0.3); }
+.order-confirmation pre {
+  background: none; border: none; padding: 0; margin: 0; font-size: 12px;
+}
+
+/* ── Positions page ── */
+.pos-page        { padding: 24px; max-width: 1100px; margin: 0 auto; }
+.pos-live-wrap   { margin-bottom: 28px; }
+.pos-strat-wrap  { }
+.pos-section-hdr {
+  font-size: 11px; font-weight: 700; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.08em;
+  margin-bottom: 12px; display: flex; align-items: center; gap: 10px;
+}
+.pos-refresh { font-weight: 400; font-size: 10px; color: var(--dim); opacity: 0.6; }
+.btn-pos-refresh {
+  background: none; border: 1px solid var(--border); border-radius: 5px;
+  color: var(--dim); font-size: 10px; font-weight: 600; padding: 2px 7px;
+  cursor: pointer; transition: all var(--ease); margin-left: auto;
+}
+.btn-pos-refresh:hover { border-color: var(--blue); color: var(--blue); }
+.htmx-request .btn-pos-refresh { opacity: 0.4; pointer-events: none; }
+.pos-refresh-spin { font-size: 10px; color: var(--dim); }
+.pos-pre     { font-size: 12px; margin-bottom: 10px; }
+.pos-err     { color: var(--red); font-size: 13px; padding: 12px 0; }
+.pos-empty   { color: var(--dim); font-size: 14px; padding: 20px 0; }
+
+.pos-table-wrap { overflow-x: auto; }
+.pos-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 13px; white-space: nowrap;
+}
+.pos-table thead th {
+  text-align: left; padding: 8px 14px;
+  font-size: 11px; font-weight: 700; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky; top: 0;
+}
+.pos-table tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background var(--ease);
+}
+.pos-table tbody tr:hover { background: var(--bg3); }
+.pos-table td { padding: 10px 14px; vertical-align: top; }
+.pos-ticker { font-weight: 700; font-size: 14px; }
+.pos-mono   { font-family: var(--mono); font-size: 12px; }
+.pos-profit { color: var(--green) !important; font-weight: 700; font-family: var(--mono); }
+.pos-loss   { color: var(--red)   !important; font-weight: 700; font-family: var(--mono); }
+.pos-date   { color: var(--dim); font-size: 11px; }
+.pos-be     { color: var(--yellow); }
+.pos-action { white-space: nowrap; }
+.btn-cancel {
+  background: none; border: 1px solid var(--red);
+  border-radius: 6px; color: var(--red); font-size: 11px;
+  font-weight: 600; padding: 3px 8px; cursor: pointer;
+  transition: all var(--ease); white-space: nowrap;
+}
+.btn-cancel:hover { background: var(--red); color: #fff; }
+/* grayed-out state while cancel request is in flight */
+.htmx-request .btn-cancel {
+  opacity: 0.45; pointer-events: none; cursor: default;
+  border-color: var(--dim); color: var(--dim);
+}
+.cancel-busy { display: none; }
+.htmx-request .cancel-busy { display: inline; }
+.htmx-request .cancel-idle { display: none; }
+.cancel-result   { font-size: 11px; font-weight: 600; }
+.cancel-ok  { color: var(--green); }
+.cancel-err { color: var(--red); }
+.pos-toggle {
+  margin-left: auto; display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 500; color: var(--dim);
+  cursor: pointer; text-transform: none; letter-spacing: 0;
+}
+.pos-toggle input { accent-color: var(--blue); cursor: pointer; }
+
+/* DTE badges */
+.dte-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+}
+.dte-ok       { background: rgba(0,200,5,0.12);   color: var(--green); }
+.dte-warn     { background: rgba(245,197,24,0.15); color: var(--yellow); }
+.dte-urgent   { background: rgba(255,80,0,0.15);  color: var(--red); }
+.dte-expired  { background: var(--bg3); color: var(--dim); }
+.dte-dim      { color: var(--dim); }
+
+/* Status pills */
+.pos-status    { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; }
+.pos-filled    { background: rgba(0,200,5,0.12);   color: var(--green); }
+.pos-pending   { background: rgba(56,125,255,0.12); color: var(--blue); }
+.pos-cancelled { background: var(--bg3); color: var(--dim); }
+
 /* ── Sidebar backdrop ── */
 .sidebar-backdrop {
   display: none; position: fixed; inset: 0;
@@ -576,8 +801,269 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
 """
 
 
+async def _fundamentals_card(ticker: str) -> str:
+    """Compact fundamentals summary card — fetched in parallel with options analysis."""
+    try:
+        from tools.market_data import get_fundamentals
+        data = await asyncio.wait_for(get_fundamentals(ticker), timeout=12)
+        if "error" in data:
+            return ""
+
+        def _f(v, fmt=".1f", suffix=""):
+            try:
+                return f"{float(v):{fmt}}{suffix}" if v is not None else "—"
+            except (TypeError, ValueError):
+                return "—"
+
+        mcap   = data.get("market_cap")
+        mcap_s = f"${mcap/1e9:.1f}B" if mcap and mcap >= 1e9 else (f"${mcap/1e6:.0f}M" if mcap else "—")
+        pe     = _f(data.get("pe_ratio"),              ".1f")
+        fpe    = _f(data.get("forward_pe"),             ".1f")
+        rev    = _f(data.get("revenue_growth_yoy_pct"), ".1f", "%")
+        margin = _f(data.get("profit_margin_pct"),      ".1f", "%")
+        de     = _f(data.get("debt_to_equity"),         ".1f")
+        roe    = _f(data.get("roe_pct"),                ".1f", "%")
+        div    = data.get("dividend_yield_pct") or 0
+        div_s  = _f(div, ".2f", "%") if div and float(div) > 0 else None
+        sector = data.get("sector") or ""
+        ind    = data.get("industry") or ""
+        name   = data.get("company_name", ticker)
+
+        metrics = [
+            ("Mkt Cap",    mcap_s),
+            ("P/E",        pe),
+            ("Fwd P/E",    fpe),
+            ("Rev YoY",    rev),
+            ("Net Margin", margin),
+            ("D/E",        de),
+            ("ROE",        roe),
+        ]
+        if div_s:
+            metrics.append(("Div Yield", div_s))
+
+        chips = "".join(
+            f'<span class="fund-metric"><span class="fund-label">{lbl}</span>{val}</span>'
+            for lbl, val in metrics
+        )
+        sub    = " · ".join(filter(None, [sector, ind]))
+        source = data.get("source", "Yahoo Finance")
+        src_url = data.get("source_url", "")
+        src_link = (f'<a href="{src_url}" target="_blank" class="fund-source">{source}</a>'
+                    if src_url else f'<span class="fund-source">{source}</span>')
+        return (
+            f'<div class="fund-card">'
+            f'<div class="fund-name">{name}'
+            f'{"  <span class=\"fund-sub\">" + sub + "</span>" if sub else ""}'
+            f'</div>'
+            f'<div class="fund-metrics">{chips}</div>'
+            f'<div class="fund-footer">Source: {src_link}</div>'
+            f'</div>'
+        )
+    except Exception:
+        return ""
+
+
+async def _build_positions_html() -> str:
+    import asyncio as _aio
+    from datetime import date, datetime
+
+    from db.database import order_history
+
+    orders = await order_history(limit=100)
+    today  = date.today()
+
+    # ── Sync pending order statuses from IBKR ───────────────────────────────
+    live_open_ids: set[str]      = set()
+    live_statuses: dict[str, str] = {}
+    ibkr_synced = False
+    try:
+        from mcp_servers.ibkr_orders.server import get_live_order_statuses
+        from db.database import update_order_status
+        live_open_ids, live_statuses = await _aio.wait_for(get_live_order_statuses(), timeout=15)
+        ibkr_synced = True
+        for o in orders:
+            oid = str(o.get("ibkr_order_id") or "")
+            if oid and "submit" in (o.get("status") or "").lower() and oid in live_statuses:
+                new_s = live_statuses[oid]
+                if any(t in new_s.lower() for t in ("fill", "cancel", "inactive")):
+                    await update_order_status(oid, new_s)
+                    o["status"] = new_s
+    except Exception:
+        pass
+
+    # ── Live positions from ib_insync (best-effort) ──────────────────────────
+    _refresh_btn = (
+        f'<button class="btn-pos-refresh"'
+        f' hx-get="/api/positions-fragment"'
+        f' hx-target="#positions-content"'
+        f' hx-swap="innerHTML"'
+        f' hx-indicator=".pos-refresh-spin">'
+        f'↻ Refresh</button>'
+        f'<span class="pos-refresh-spin htmx-indicator">fetching…</span>'
+    )
+    try:
+        from mcp_servers.ibkr_positions.server import get_live_pnl, get_open_positions
+        pnl_text = await _aio.wait_for(get_live_pnl(),       timeout=20)
+        pos_text = await _aio.wait_for(get_open_positions(), timeout=20)
+        live_body = f'<pre class="pos-pre">{pnl_text}</pre><pre class="pos-pre">{pos_text}</pre>'
+    except Exception as exc:
+        err = str(exc) or type(exc).__name__
+        live_body = f'<p class="pos-err">IB Gateway offline: {err}</p>'
+    live_html = (
+        f'<div class="pos-live-wrap">'
+        f'<div class="pos-section-hdr">Live Account'
+        f'  <span class="pos-refresh">auto-refresh 60s</span>'
+        f'  {_refresh_btn}'
+        f'</div>'
+        f'{live_body}'
+        f'</div>'
+    )
+
+    # ── Strategy table from order history ────────────────────────────────────
+    if not orders:
+        strat_html = '<p class="pos-empty">No orders in history yet.</p>'
+    else:
+        rows = []
+        for o in orders:
+            ibkr_oid = str(o.get("ibkr_order_id") or "")
+            if ibkr_synced and ibkr_oid and ibkr_oid in live_statuses:
+                o = {**o, "status": live_statuses[ibkr_oid]}
+
+            expiry = o.get("expiry") or ""
+            try:
+                exp_date = date.fromisoformat(expiry)
+                dte      = max(0, (exp_date - today).days)
+                exp_disp = exp_date.strftime("%b %d '%y")
+            except Exception:
+                dte = None
+                exp_disp = expiry
+
+            short_s = float(o.get("short_strike") or 0)
+            long_s  = float(o.get("long_strike")  or 0)
+            net     = float(o.get("net_price")     or 0)
+            qty     = int(o.get("quantity")         or 1)
+            spread  = abs(short_s - long_s)
+            right   = (o.get("option_type") or "P").upper()
+
+            is_credit = net > 0
+            if is_credit:
+                max_p = round(abs(net) * 100 * qty)
+                max_l = round((spread - abs(net)) * 100 * qty)
+                breakeven = round(short_s - abs(net), 2) if right == "P" else round(short_s + abs(net), 2)
+            else:
+                max_l = round(abs(net) * 100 * qty)
+                max_p = round((spread - abs(net)) * 100 * qty)
+                breakeven = round(max(short_s, long_s) - abs(net), 2) if right == "P" else round(min(short_s, long_s) + abs(net), 2)
+
+            # DTE badge
+            if dte is None:
+                dte_cell = '<span class="dte-badge dte-dim">—</span>'
+            elif dte == 0:
+                dte_cell = '<span class="dte-badge dte-expired">Expired</span>'
+            elif dte <= 7:
+                dte_cell = f'<span class="dte-badge dte-urgent">{dte}d ⚠</span>'
+            elif dte <= 21:
+                dte_cell = f'<span class="dte-badge dte-warn">{dte}d</span>'
+            else:
+                dte_cell = f'<span class="dte-badge dte-ok">{dte}d</span>'
+
+            status = (o.get("status") or "—").lower()
+            if "fill" in status:
+                status_cell = '<span class="pos-status pos-filled">Filled</span>'
+            elif "submit" in status:
+                status_cell = '<span class="pos-status pos-pending">Pending</span>'
+            elif "cancel" in status:
+                status_cell = '<span class="pos-status pos-cancelled">Cancelled</span>'
+            else:
+                status_cell = f'<span class="pos-status">{status}</span>'
+
+            ts = (o.get("timestamp") or "")[:10]
+            strategy = o.get("strategy") or "—"
+            ticker   = o.get("ticker") or "—"
+            right_w  = "Put" if right == "P" else "Call"
+
+            is_cancelled = "cancel" in status
+            is_filled    = "fill" in status
+            # Show cancel unless IBKR explicitly reports the order as closed.
+            # If IBKR doesn't know the order (cross-session), still allow the
+            # attempt — IBKR will return "not found" if it's already done.
+            ibkr_live_status = live_statuses.get(ibkr_oid, "").lower() if ibkr_synced else ""
+            ibkr_closed = bool(ibkr_live_status and any(
+                t in ibkr_live_status for t in ("fill", "cancel", "inactive")
+            ))
+            can_cancel   = (
+                not is_cancelled and not is_filled
+                and ibkr_oid and ibkr_oid not in ("", "None", "0")
+                and not ibkr_closed
+            )
+
+            if can_cancel:
+                action_cell = (
+                    f'<form hx-post="/api/cancel-order" hx-target="this" hx-swap="outerHTML">'
+                    f'<input type="hidden" name="order_id" value="{ibkr_oid}">'
+                    f'<button type="submit" class="btn-cancel">'
+                    f'<span class="cancel-idle">✕ Cancel</span>'
+                    f'<span class="cancel-busy">Cancelling…</span>'
+                    f'</button>'
+                    f'</form>'
+                )
+            else:
+                action_cell = ""
+
+            rows.append(
+                f'<tr id="order-row-{ibkr_oid}"{" data-cancelled" if is_cancelled else ""}>'
+                f'<td class="pos-ticker">{ticker}</td>'
+                f'<td>{strategy}</td>'
+                f'<td class="pos-mono">${short_s:.0f} / ${long_s:.0f} {right_w}</td>'
+                f'<td>{exp_disp}<br>{dte_cell}</td>'
+                f'<td class="pos-profit">+${max_p}</td>'
+                f'<td class="pos-loss">-${max_l}</td>'
+                f'<td class="pos-mono pos-be">${breakeven:.2f}</td>'
+                f'<td class="pos-mono">{qty}</td>'
+                f'<td class="pos-mono">{"+$" if is_credit else "-$"}{abs(net):.2f}</td>'
+                f'<td>{status_cell}</td>'
+                f'<td class="pos-date">{ts}</td>'
+                f'<td class="pos-action">{action_cell}</td>'
+                f'</tr>'
+            )
+
+        strat_html = (
+            f'<div class="pos-section-hdr">Strategy History'
+            f'<label class="pos-toggle">'
+            f'<input type="checkbox" id="show-cancelled" onchange="toggleCancelled(this.checked)">'
+            f'Show cancelled'
+            f'</label>'
+            f'</div>'
+            f'<div class="pos-table-wrap">'
+            f'<table class="pos-table" id="pos-table">'
+            f'<thead><tr>'
+            f'<th>Symbol</th><th>Strategy</th><th>Strikes</th>'
+            f'<th>Expiry / DTE</th>'
+            f'<th class="pos-profit">Max Profit</th>'
+            f'<th class="pos-loss">Max Loss</th>'
+            f'<th>Breakeven</th>'
+            f'<th>Qty</th><th>Net</th><th>Status</th><th>Date</th><th></th>'
+            f'</tr></thead>'
+            f'<tbody>' + "\n".join(rows) + '</tbody>'
+            f'</table>'
+            f'</div>'
+            f'<script>'
+            f'(function(){{'
+            f'  function toggleCancelled(show){{'
+            f'    document.querySelectorAll("#pos-table tr[data-cancelled]")'
+            f'      .forEach(function(r){{ r.style.display = show ? "" : "none"; }});'
+            f'  }}'
+            f'  window.toggleCancelled = toggleCancelled;'
+            f'  toggleCancelled(false);'  # hide by default
+            f'}})();'
+            f'</script>'
+        )
+
+    return f'<div class="pos-page">{live_html}<div class="pos-strat-wrap">{strat_html}</div></div>'
+
+
 def _page(history: list[dict], active_tab: str = "search",
-          body_override: str | None = None) -> str:
+          body_override: str | None = None, show_search: bool = True) -> str:
     sidebar = _sidebar_items(history)
     search_content = (body_override if body_override else
         '<div class="placeholder">'
@@ -587,10 +1073,11 @@ def _page(history: list[dict], active_tab: str = "search",
         '</div>')
 
     _tabs = [
-        ("search",   "/",            "🔍", "Search"),
-        ("ibkr",     "/ibkr",        "⚡", "IBKR"),
-        ("research", "/ui-research", "🔬", "Research"),
-        ("test",     "/test",        "✅", "Tests"),
+        ("search",    "/",            "🔍", "Search"),
+        ("positions", "/positions",   "📋", "Positions"),
+        ("ibkr",      "/ibkr",        "⚡", "IBKR"),
+        ("research",  "/ui-research", "🔬", "Research"),
+        ("test",      "/test",        "✅", "Tests"),
     ]
     bottom_nav = "".join(
         f'<a href="{url}" class="{"active" if t == active_tab else ""}">'
@@ -617,10 +1104,11 @@ def _page(history: list[dict], active_tab: str = "search",
       <span class="logo-text">FinAgent</span>
     </a>
     <nav class="nav-links">
-      <a href="/"            class="nav-link {'active' if active_tab=='search'   else ''}">Search</a>
-      <a href="/ibkr"        class="nav-link {'active' if active_tab=='ibkr'     else ''}">IBKR</a>
-      <a href="/ui-research" class="nav-link {'active' if active_tab=='research' else ''}">Research</a>
-      <a href="/test"        class="nav-link {'active' if active_tab=='test'     else ''}">Tests</a>
+      <a href="/"            class="nav-link {'active' if active_tab=='search'    else ''}">Search</a>
+      <a href="/positions"   class="nav-link {'active' if active_tab=='positions' else ''}">Positions</a>
+      <a href="/ibkr"        class="nav-link {'active' if active_tab=='ibkr'      else ''}">IBKR</a>
+      <a href="/ui-research" class="nav-link {'active' if active_tab=='research'  else ''}">Research</a>
+      <a href="/test"        class="nav-link {'active' if active_tab=='test'       else ''}">Tests</a>
     </nav>
     <div class="theme-toggle">
       <button class="theme-btn" id="t-dark"  onclick="setTheme('dark')"  title="Dark">🌙</button>
@@ -635,25 +1123,7 @@ def _page(history: list[dict], active_tab: str = "search",
     </aside>
 
     <div class="content">
-      <div class="search-bar">
-        <form class="search-form"
-              hx-post="/search"
-              hx-target="#results"
-              hx-swap="innerHTML"
-              hx-indicator="#spinner">
-          <div class="ticker-wrap">
-            <input name="ticker" type="text" placeholder="AAPL" maxlength="6"
-                   autocomplete="off" autocapitalize="characters" autofocus />
-          </div>
-          <select name="outlook">
-            <option value="bullish">📈 Bullish</option>
-            <option value="bearish">📉 Bearish</option>
-            <option value="neutral">↔️ Neutral</option>
-          </select>
-          <button class="btn" type="submit">Analyze</button>
-          <div id="spinner" class="htmx-indicator">Fetching…</div>
-        </form>
-      </div>
+      {'<div class="search-bar"><form class="search-form" id="search-form" hx-post="/search" hx-target="#results" hx-swap="innerHTML" hx-indicator="#spinner"><div class="ticker-wrap"><input name="ticker" type="text" placeholder="AAPL" maxlength="6" autocomplete="off" autocapitalize="characters" autofocus /></div><select name="outlook"><option value="bullish">📈 Bullish</option><option value="bearish">📉 Bearish</option><option value="neutral">↔️ Neutral</option></select><input type="hidden" name="term" id="term-input" value="short"><button class="btn" type="submit" onclick="setTerm(\'short\')">📅 Short Term</button><button class="btn btn-long" type="submit" onclick="setTerm(\'long\')">📆 Long Term</button><div id="spinner" class="htmx-indicator">Fetching…</div></form><script>function setTerm(t){document.getElementById("term-input").value=t;}</script></div>' if show_search else ''}
 
       <div id="results">{search_content}</div>
     </div>

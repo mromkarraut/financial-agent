@@ -35,12 +35,6 @@
       "cwd": "/home/omkar/repos/financial-agent",
       "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
     },
-    "financial-ibkr": {
-      "command": "python",
-      "args": ["-m", "mcp_servers.ibkr.server"],
-      "cwd": "/home/omkar/repos/financial-agent",
-      "env": { "VIRTUAL_ENV": "/home/omkar/venvs", "PATH": "/home/omkar/venvs/bin:/usr/bin:/bin" }
-    },
     "financial-heartbeat": {
       "command": "python",
       "args": ["-m", "mcp_servers.heartbeat.server"],

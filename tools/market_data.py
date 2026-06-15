@@ -165,6 +165,8 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
         "dividend_yield_pct": _safe(
             (info.get("dividendYield") or 0) * 100
         ),
+        "source": "Yahoo Finance",
+        "source_url": "https://finance.yahoo.com",
     }
 
 
@@ -321,12 +323,83 @@ async def get_stock_data(ticker: str) -> dict:
         return {"error": str(exc)}
 
 
+def _parse_ibkr_fundamentals_xml(xml: str, ticker: str) -> dict:
+    """Parse Reuters/Refinitiv ReportSnapshot XML from IB Gateway into our standard dict."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml)
+
+    def _ratio(field: str) -> float | None:
+        for el in root.iter("Ratio"):
+            if el.get("FieldName") == field:
+                try:
+                    return float(el.text)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _text(tag: str) -> str | None:
+        el = root.find(f".//{tag}")
+        return el.text.strip() if el is not None and el.text else None
+
+    mcap_m = _ratio("MKTCAP")  # in millions
+    return {
+        "ticker":                  ticker.upper(),
+        "company_name":            _text("CoName") or ticker,
+        "sector":                  _text("Industry"),
+        "industry":                _text("Industry"),
+        "pe_ratio":                _ratio("PEEXCLXOR"),
+        "forward_pe":              _ratio("FWDPEEXCL"),
+        "eps_ttm":                 _ratio("TTMEPSXCLX"),
+        "eps_forward":             _ratio("EPSFWD"),
+        "revenue_growth_yoy_pct":  _ratio("TTMREVCHG"),
+        "quarterly_revenues":      [],
+        "debt_to_equity":          _ratio("QTOTD2EQ"),
+        "profit_margin_pct":       _ratio("TTMNPMGN"),
+        "gross_margin_pct":        _ratio("TTMGROSMGN"),
+        "roe_pct":                 _ratio("TTMROEPCT"),
+        "market_cap":              mcap_m * 1e6 if mcap_m else None,
+        "dividend_yield_pct":      _ratio("YIELD"),
+        "source":                  "IB Gateway (Reuters Refinitiv)",
+        "source_url":              "",
+    }
+
+
+async def _get_fundamentals_ibkr(ticker: str) -> dict | None:
+    """Try IB Gateway reqFundamentalData. Returns None if unavailable."""
+    try:
+        from tools.ibkr_tws import connect_ib
+        import config as _cfg
+        ib  = await asyncio.wait_for(
+            connect_ib(_cfg.IBKR_CLIENT_ID_MARKET_DATA, timeout=15), timeout=18
+        )
+        from ib_insync import Stock
+        contract  = Stock(ticker.upper(), "SMART", "USD")
+        qualified = await ib.qualifyContractsAsync(contract)
+        if not qualified:
+            return None
+        xml = await asyncio.wait_for(
+            ib.reqFundamentalDataAsync(qualified[0], "ReportSnapshot"), timeout=12
+        )
+        if not xml:
+            return None
+        return _parse_ibkr_fundamentals_xml(xml, ticker)
+    except Exception as exc:
+        logger.debug("IBKR fundamentals unavailable for %s: %s", ticker, exc)
+        return None
+
+
 async def get_fundamentals(ticker: str) -> dict:
-    """Returns PE, forward PE, EPS, revenue growth, debt/equity, margins."""
+    """Returns PE, forward PE, EPS, revenue growth, debt/equity, margins.
+    Tries IB Gateway (Reuters Refinitiv) first; falls back to Yahoo Finance."""
+    ibkr = await _get_fundamentals_ibkr(ticker)
+    if ibkr:
+        logger.info("get_fundamentals(%s): using IB Gateway data", ticker)
+        return ibkr
+    logger.info("get_fundamentals(%s): falling back to Yahoo Finance", ticker)
     try:
         return await asyncio.to_thread(_fetch_fundamentals_sync, ticker)
     except Exception as exc:
-        logger.error("get_fundamentals(%s) failed: %s", ticker, exc)
+        logger.error("get_fundamentals(%s) yfinance failed: %s", ticker, exc)
         return {"error": str(exc)}
 
 
@@ -340,9 +413,23 @@ async def get_options_data(ticker: str) -> dict:
 
 
 async def get_options_chain(ticker: str) -> dict:
-    """Returns current price, expirations, and options chain (calls+puts) for first 4 expirations."""
+    """Returns current price, expirations, and options chain (calls+puts) for first 4 expirations.
+    Tries IB Gateway (ib_insync) first; falls back to yfinance if not connected or market closed."""
     try:
-        return await asyncio.to_thread(_fetch_options_chain_sync, ticker)
+        from tools.ibkr_options import get_options_chain_ibkr
+        ibkr_data = await get_options_chain_ibkr(ticker)
+        if "error" not in ibkr_data:
+            logger.info("get_options_chain(%s): using IB Gateway data", ticker)
+            ibkr_data["source"] = "IB Gateway"
+            return ibkr_data
+        logger.info("IBKR options unavailable (%s) — falling back to yfinance", ibkr_data["error"])
+    except Exception as exc:
+        logger.debug("IBKR options import/call failed for %s: %s", ticker, exc)
+
+    try:
+        data = await asyncio.to_thread(_fetch_options_chain_sync, ticker)
+        data["source"] = "Yahoo Finance"
+        return data
     except Exception as exc:
         logger.error("get_options_chain(%s) failed: %s", ticker, exc)
         return {"error": str(exc)}

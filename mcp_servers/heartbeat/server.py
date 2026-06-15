@@ -185,23 +185,18 @@ async def _probe_standard(slug: str) -> ProbeResult:
 
 
 async def _probe_ibkr() -> ProbeResult:
-    """IBKR probe: standard DB check + CP Gateway auth status."""
+    """IBKR probe: standard DB check + IB Gateway TWS socket ping."""
     result = await _probe_standard("ibkr")
-    # Attempt a quick gateway ping (non-blocking, fast timeout)
     gateway_note = ""
     try:
-        from agents.ibkr_agent import auth_status
-        gw = await asyncio.wait_for(auth_status(), timeout=3.0)
-        if gw.get("error"):
-            gateway_note = " | Gateway: unreachable"
-        elif gw.get("authenticated"):
-            gateway_note = " | Gateway: authenticated ✓"
-        else:
-            gateway_note = " | Gateway: not authenticated"
-    except asyncio.TimeoutError:
-        gateway_note = " | Gateway: timeout"
+        import socket
+        s = socket.create_connection(("127.0.0.1", 4002), timeout=2)
+        s.close()
+        gateway_note = " | IB Gateway: port 4002 reachable"
+    except OSError:
+        gateway_note = " | IB Gateway: port 4002 unreachable"
     except Exception as exc:
-        gateway_note = f" | Gateway: {exc}"
+        gateway_note = f" | IB Gateway: {exc}"
     return ProbeResult(
         result.status,
         result.latency_ms,

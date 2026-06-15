@@ -116,6 +116,27 @@ def _make_strategy(
     if max_loss <= 0:
         return {}
 
+    # Guaranteed-loss debit spread: paid more than spread can ever be worth
+    if not is_credit and max_profit <= 0:
+        return {}
+
+    # Guaranteed-loss credit spread: both legs already ITM
+    # (stock below protection put for bull_put, or above protection call for bear_call)
+    # → spread expires at max loss regardless of movement
+    if is_credit:
+        if "bull_put" in kind and S < buy_strike:
+            return {}
+        if "bear_call" in kind and S > buy_strike:
+            return {}
+
+    # Negligible credit — IBKR flags near-zero credits as riskless/worthless
+    if is_credit and net < 0.10:
+        return {}
+
+    # Debit spread not worth placing if max profit < $5/contract after commission
+    if not is_credit and max_profit < 5:
+        return {}
+
     roc = round(max_profit / max_loss * 100, 1)
     score = round(pop * (roc / 100), 4)
 
@@ -148,9 +169,9 @@ def _make_strategy(
 
 def _is_vertical(buy_strike: float, sell_strike: float, buy_row: dict,
                   sell_row: dict, exp: str) -> bool:
-    """Guard: both legs must be same type, same expiration, different strikes."""
+    """Guard: both legs must be same type, same expiration, meaningfully different strikes."""
     return (
-        buy_strike != sell_strike
+        abs(buy_strike - sell_strike) >= 0.5   # reject same-strike or rounding artifacts
         and bool(buy_row) and bool(sell_row)
         and _mid(buy_row) > 0 and _mid(sell_row) > 0
     )
@@ -167,7 +188,7 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float) -> list
     for chain in chains[:3]:
         exp = chain["expiration"]
         dte = _dte(exp)
-        if dte <= 0:
+        if dte <= 4:
             continue
         T = dte / 365.0
         calls_l = sorted([r for r in chain.get("calls", []) if r.get("strike")], key=lambda r: r["strike"])
@@ -323,17 +344,56 @@ def _fmt_chain_table(chain: dict, price: float) -> str:
 
 
 def _fmt_comparison(strategies: list[dict], best_num: str) -> str:
-    header = f"{'#':<2} {'Strategy':<18} {'Exp':>5}  {'POP':>3}  {'P50':>3}  {'Net':>5}  {'ROC':>4}"
-    sep    = "━" * len(header)
-    rows   = [header, sep]
+    # Column widths
+    W = {"num": 2, "name": 22, "strikes": 12, "exp": 5, "pop": 4, "p50": 4, "net": 6, "roc": 5}
+
+    def _cell(text: str, w: int, align: str = "<") -> str:
+        return f"{text:{align}{w}}"
+
+    def _row(cells: list[str]) -> str:
+        return "│" + "│".join(f" {c} " for c in cells) + "│"
+
+    def _divider(left: str, mid: str, right: str) -> str:
+        segs = ["─" * (w + 2) for w in W.values()]
+        return left + mid.join(segs) + right
+
+    header_cells = [
+        _cell("#",        W["num"]),
+        _cell("Strategy", W["name"]),
+        _cell("Strikes",  W["strikes"]),
+        _cell("Exp",      W["exp"],  ">"),
+        _cell("POP",      W["pop"],  ">"),
+        _cell("P50",      W["p50"],  ">"),
+        _cell("Net",      W["net"],  ">"),
+        _cell("ROC",      W["roc"],  ">"),
+    ]
+
+    lines = [
+        _divider("┌", "┬", "┐"),
+        _row(header_cells),
+        _divider("├", "┼", "┤"),
+    ]
+
     for s in strategies:
+        right   = "C" if "call" in s["kind"] else "P"
+        strikes = f"${s['sell_strike']:.0f}/${s['buy_strike']:.0f}{right}"
         net_str = f"+${s['max_profit']}" if s["is_credit"] else f"-${s['max_loss']}"
-        star    = " ⭐" if s["num"] == best_num else ""
-        rows.append(
-            f"{s['num']:<2} {s['name']:<18} {_fmt_exp(s['exp'], short=True):>5}  "
-            f"{s['pop']*100:>2.0f}%  {s['p50']*100:>2.0f}%  {net_str:>5}  {s['roc']:>3.0f}%{star}"
-        )
-    return "<pre>" + "\n".join(rows) + "</pre>"
+        star    = "⭐" if s["num"] == best_num else " "
+        roc_str = f"{s['roc']:>3.0f}%{star}"
+
+        lines.append(_row([
+            _cell(s["num"],                           W["num"]),
+            _cell(s["name"][:W["name"]],              W["name"]),
+            _cell(strikes[:W["strikes"]],             W["strikes"]),
+            _cell(_fmt_exp(s["exp"], short=True),     W["exp"],  ">"),
+            _cell(f"{s['pop']*100:.0f}%",             W["pop"],  ">"),
+            _cell(f"{s['p50']*100:.0f}%",             W["p50"],  ">"),
+            _cell(net_str,                            W["net"],  ">"),
+            _cell(roc_str,                            W["roc"],  ">"),
+        ]))
+
+    lines.append(_divider("└", "┴", "┘"))
+    return "<pre>" + "\n".join(lines) + "</pre>"
 
 
 def _fmt_detail_card(s: dict, price: float) -> str:
@@ -394,17 +454,104 @@ def _fmt_detail_card(s: dict, price: float) -> str:
         + row("Spread",           f"${s['spread']:.0f}")
     ).rstrip("\n")
 
+    # ── Payoff scenarios at expiration ────────────────────────────────────────
+    lo = min(s["buy_strike"], s["sell_strike"])
+    hi = max(s["buy_strike"], s["sell_strike"])
+    be = s["breakeven"]
+    mp = s["max_profit"]
+    ml = s["max_loss"]
+    net = abs(s["net"])
+
+    def _pnl_at(stock_price: float) -> int:
+        """Approximate P&L (in dollars, 1 contract) at expiration."""
+        K_short = s["sell_strike"]
+        K_long  = s["buy_strike"]
+        is_call = "call" in s["kind"]
+        if s["is_credit"]:
+            if is_call:   # bear call: profit if stock < K_short
+                intrinsic_short = max(0, stock_price - K_short)
+                intrinsic_long  = max(0, stock_price - K_long)
+            else:         # bull put: profit if stock > K_short
+                intrinsic_short = max(0, K_short - stock_price)
+                intrinsic_long  = max(0, K_long  - stock_price)
+            pnl = (net - (intrinsic_short - intrinsic_long)) * 100
+        else:
+            if is_call:   # bull call: profit if stock > K_short (buy lower)
+                intrinsic_buy  = max(0, stock_price - K_long)
+                intrinsic_sell = max(0, stock_price - K_short)
+            else:         # bear put: profit if stock < K_short (buy higher)
+                intrinsic_buy  = max(0, K_long  - stock_price)
+                intrinsic_sell = max(0, K_short - stock_price)
+            pnl = (intrinsic_buy - intrinsic_sell - net) * 100
+        return int(round(pnl))
+
+    step   = round((hi - lo) / 4, 2)
+    prices = sorted({
+        round(lo - step, 2),
+        lo, be, hi,
+        round(hi + step, 2),
+    })
+    scen_lines = [f"{'Stock Price':>12}  {'P&L (1 contract)':>18}  {'Outcome':<20}"]
+    scen_lines.append("─" * 56)
+    for px in prices:
+        pnl = _pnl_at(px)
+        sign = "+" if pnl >= 0 else ""
+        if pnl >= mp:
+            outcome = "Max profit ✅"
+        elif pnl <= -ml:
+            outcome = "Max loss ❌"
+        elif abs(pnl) <= 2:
+            outcome = "Break-even ~"
+        elif pnl > 0:
+            outcome = "Profit"
+        else:
+            outcome = "Loss"
+        scen_lines.append(f"${px:>11.2f}  {sign}${abs(pnl):>16}  {outcome}")
+
+    scenarios = "<pre>" + "\n".join(scen_lines) + "</pre>"
+
     return (
-        f"<b>The Legs :</b>  {sell_leg}\n"
-        f"             {buy_leg} <i>(protection)</i>\n\n"
+        f"<b>The Legs</b><br>\n"
+        f"  {sell_leg}<br>\n"
+        f"  {buy_leg} <i>(protection)</i><br>\n<br>\n"
 
-        f"<b>How it works</b>\n"
-        f"  {n1}\n"
-        f"  {n2}\n"
-        f"  {n3}\n\n"
+        f"<b>How it works</b><br>\n"
+        f"  {n1}<br>\n"
+        f"  {n2}<br>\n"
+        f"  {n3}<br>\n<br>\n"
 
-        f"<b>Key Numbers</b>\n\n"
-        f"<code>{table}</code>"
+        f"<b>Key Numbers</b>\n"
+        f"<pre>{table}</pre>"
+
+        f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n"
+        f"{scenarios}"
+    )
+
+
+def _fmt_order_button(s: dict, ticker: str) -> str:
+    right       = "C" if "call" in s["kind"] else "P"
+    net_display = f"+${s['max_profit']} credit" if s["is_credit"] else f"-${s['max_loss']} debit"
+    return (
+        f'<div class="order-panel">'
+        f'<div class="order-panel-label">📋 Recommended trade — place via IB Gateway</div>'
+        f'<form hx-post="/api/place-order" hx-target="#order-result" hx-swap="innerHTML" hx-indicator="#order-spinner">'
+        f'<input type="hidden" name="ticker"       value="{ticker}">'
+        f'<input type="hidden" name="short_strike" value="{s["sell_strike"]}">'
+        f'<input type="hidden" name="long_strike"  value="{s["buy_strike"]}">'
+        f'<input type="hidden" name="right"        value="{right}">'
+        f'<input type="hidden" name="expiry"       value="{s["exp"]}">'
+        f'<input type="hidden" name="net_price"    value="{s["net"]}">'
+        f'<div class="order-row">'
+        f'<label class="qty-label">Qty'
+        f'<input type="number" name="quantity" value="1" min="1" max="100" class="qty-input">'
+        f'</label>'
+        f'<button type="submit" class="btn order-btn">🚀 Place {s["name"]}</button>'
+        f'<span class="order-net">{net_display} · {ticker} {right} {s["sell_strike"]:.0f}/{s["buy_strike"]:.0f} {s["exp"]}</span>'
+        f'</div>'
+        f'</form>'
+        f'<div id="order-spinner" class="htmx-indicator order-spinner">⏳ Placing order…</div>'
+        f'<div id="order-result"></div>'
+        f'</div>'
     )
 
 
@@ -508,9 +655,12 @@ class OptionsResearchAgent(BaseAgent):
     async def run(self, input: dict) -> AgentResult:
         ticker:  str = input.get("ticker", "").strip().upper()
         outlook: str = input.get("outlook", "neutral").lower()
+        term:    str = input.get("term", "short").lower()   # "short" ≤45d  "long" >21d
         chat_id: str = str(input.get("chat_id", ""))
         if outlook not in ("bullish", "bearish", "neutral"):
             outlook = "neutral"
+        if term not in ("short", "long"):
+            term = "short"
 
         if not ticker:
             return AgentResult(agent=self.name, version=self.version,
@@ -528,6 +678,17 @@ class OptionsResearchAgent(BaseAgent):
             name       = mkt.get("company_name", ticker)
             hv_series  = mkt.get("hv_series") or []
             hv_30d     = mkt.get("hv_30d")
+
+            # Filter chains by term horizon — always exclude ≤4 DTE (too close to expiry)
+            viable = [c for c in chains if _dte(c["expiration"]) > 4]
+            if term == "short":
+                # Prefer 5–45 DTE; fall back to all viable if none in range
+                short_chains = [c for c in viable if _dte(c["expiration"]) <= 45]
+                chains = (short_chains or viable or chains)[:3]
+            else:
+                # Prefer >21 DTE (furthest); fall back to all viable
+                long_chains = [c for c in viable if _dte(c["expiration"]) > 21]
+                chains = (long_chains or viable or chains)[-3:]
 
             # IVR — use ATM IV from first chain vs 52w HV range
             atm_iv = 0.0
@@ -557,10 +718,13 @@ class OptionsResearchAgent(BaseAgent):
             # Header
             iv_str  = f"{atm_iv*100:.1f}%" if atm_iv else "—"
             ivr_tag = ("🔴 Rich" if ivr >= 50 else "🟢 Cheap") if ivr != 50 else ""
+            term_label   = "📅 Short Term" if term == "short" else "📆 Long Term"
+            source_label = mkt.get("source", "Yahoo Finance")
             parts.append(
-                f"<b>{name} ({ticker}) — Options Research</b>\n"
+                f"<b>{name} ({ticker}) — Options Research  {term_label}</b>\n"
                 f"<code>${price:.2f}</code>  {outlook_emoji} <b>{outlook.capitalize()}</b>  "
-                f"│  IVR: <code>{ivr:.0f}</code>  IVx: <code>{iv_str}</code>  {ivr_tag}"
+                f"│  IVR: <code>{ivr:.0f}</code>  IVx: <code>{iv_str}</code>  {ivr_tag}\n"
+                f"<i>Data: {source_label}</i>"
             )
             if hv_30d:
                 parts[-1] += f"  HV30: <code>{hv_30d*100:.1f}%</code>"
@@ -589,14 +753,16 @@ class OptionsResearchAgent(BaseAgent):
                 parts.append(
                     f"\n🏆 <b>Recommended: {best['num']} {best['name']}</b>\n"
                     f"<b>{_fmt_exp(best['exp'])}  ·  {best['dte']} days to expiration</b>\n"
-                    f"──────────────────────────────────\n\n"
-                    f"📊 <b>{pop_pct}</b> probability of profit  (<b>{p50_pct}</b> chance of reaching 50% profit early)\n"
-                    f"💰 {net_desc}  ·  {risk_desc}\n"
+                    f"──────────────────────────────────<br>\n"
+                    f"📊 <b>{pop_pct}</b> probability of profit  (<b>{p50_pct}</b> chance of reaching 50% profit early)<br>\n"
+                    f"💰 {net_desc}  ·  {risk_desc}<br>\n"
                     f"📈 Best risk-adjusted return for a <b>{outlook}</b> outlook  "
                     f"(ROC {best['roc']:.0f}%)"
                 )
-                parts.append("\n" + _fmt_detail_card(best, price))
+                parts.append(f"\n<b>Trade Structure</b><br>")
+                parts.append(_fmt_detail_card(best, price))
                 parts.append(f"<pre>{_pnl_chart(best)}</pre>")
+                parts.append(_fmt_order_button(best, ticker))
             else:
                 parts.append("<i>Could not compute strategies — insufficient chain data.</i>")
 

@@ -273,18 +273,18 @@ async def _test_summarizer() -> list[T]:
 
 
 async def _test_ibkr() -> list[T]:
-    from agents.ibkr_agent import auth_status, order_history
+    from db.database import order_history
 
     async def gateway_ping():
         try:
-            s = await asyncio.wait_for(auth_status(), timeout=4.0)
-            auth = s.get("authenticated", False)
-            err  = s.get("error", "")
-            if err:
-                return True, f"gateway unreachable ({err[:60]}) — expected in dev"
-            return True, f"authenticated={auth} connected={s.get('connected', False)}"
-        except asyncio.TimeoutError:
-            return True, "gateway timeout (expected if not running)"
+            import socket
+            s = socket.create_connection(("127.0.0.1", 4002), timeout=2)
+            s.close()
+            return True, "IB Gateway port 4002 reachable"
+        except OSError:
+            return True, "IB Gateway port 4002 unreachable — expected if not running"
+        except Exception as exc:
+            return True, f"IB Gateway check error: {exc}"
 
     async def db_orders():
         rows = await order_history(limit=5)

@@ -188,3 +188,38 @@ async def watchlist_get_all() -> list[str]:
         async with db.execute("SELECT ticker FROM watchlist ORDER BY added_at") as cur:
             rows = await cur.fetchall()
     return [row[0] for row in rows]
+
+
+async def order_history(limit: int = 20) -> list[dict]:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, timestamp, ticker, strategy, short_strike, long_strike, "
+            "option_type, expiry, net_price, quantity, ibkr_order_id, status "
+            "FROM ibkr_orders ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"id": r[0], "timestamp": r[1], "ticker": r[2], "strategy": r[3],
+         "short_strike": r[4], "long_strike": r[5], "option_type": r[6],
+         "expiry": r[7], "net_price": r[8], "quantity": r[9],
+         "ibkr_order_id": r[10], "status": r[11]}
+        for r in rows
+    ]
+
+
+async def update_order_status(ibkr_order_id: str, status: str) -> None:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "UPDATE ibkr_orders SET status = ? WHERE ibkr_order_id = ?",
+            (status, str(ibkr_order_id)),
+        )
+        await db.commit()
+
+
+async def delete_order_by_ibkr_id(ibkr_order_id: str) -> None:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM ibkr_orders WHERE ibkr_order_id = ?",
+            (str(ibkr_order_id),),
+        )
+        await db.commit()
