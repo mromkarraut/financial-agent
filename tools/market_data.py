@@ -110,12 +110,17 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
     quarterly_revenues: list[dict] = []   # [{period, revenue_b, qoq_pct}]
 
     try:
+        def _find_revenue_key(index) -> str | None:
+            # Prefer exact "Total Revenue", then "Operating Revenue"; never cost lines
+            for want in ("Total Revenue", "Operating Revenue"):
+                if want in index:
+                    return want
+            return None
+
         # Annual revenue for YoY
         fin = stock.financials
         if fin is not None and not fin.empty:
-            rev_key = next(
-                (k for k in fin.index if "Total Revenue" in k or "Revenue" in k), None
-            )
+            rev_key = _find_revenue_key(fin.index)
             if rev_key:
                 revs = fin.loc[rev_key].dropna()
                 if len(revs) >= 2:
@@ -126,9 +131,7 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
         # Quarterly revenue — last 6 quarters
         qfin = stock.quarterly_financials
         if qfin is not None and not qfin.empty:
-            qrev_key = next(
-                (k for k in qfin.index if "Total Revenue" in k or "Revenue" in k), None
-            )
+            qrev_key = _find_revenue_key(qfin.index)
             if qrev_key:
                 qrevs = qfin.loc[qrev_key].dropna().sort_index()
                 vals = [(str(dt.date()), float(v)) for dt, v in qrevs.items()]
@@ -158,7 +161,8 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
         "eps_forward": _safe(info.get("forwardEps")),
         "revenue_growth_yoy_pct": revenue_yoy,
         "quarterly_revenues": quarterly_revenues,
-        "debt_to_equity": _safe(info.get("debtToEquity")),
+        # yfinance debtToEquity is already ×100 (e.g. 79.55 = 0.7955 ratio)
+        "debt_to_equity": _safe((info.get("debtToEquity") or 0) / 100),
         "profit_margin_pct": _safe(
             (info.get("profitMargins") or 0) * 100
         ),
@@ -167,8 +171,9 @@ def _fetch_fundamentals_sync(ticker: str) -> dict:
         ),
         "roe_pct": _safe((info.get("returnOnEquity") or 0) * 100),
         "market_cap": info.get("marketCap"),
+        # yfinance `dividendYield` is unreliable; use trailingAnnualDividendYield (decimal → %)
         "dividend_yield_pct": _safe(
-            (info.get("dividendYield") or 0) * 100
+            (info.get("trailingAnnualDividendYield") or 0) * 100
         ),
         "source": "Yahoo Finance",
         "source_url": "https://finance.yahoo.com",
