@@ -4,7 +4,9 @@ Market data wrapper — yfinance + DoltHub (primary for options chains) + Polygo
 Options chain priority:
   1. IB Gateway (real-time via ib_insync)
   2. DoltHub post-no-preference/options  (EOD, full Greeks, broader expirations)
-  3. Yahoo Finance (fallback)
+  — no other fallback; returns error if both unavailable.
+
+Price / HV / company metadata always comes from yfinance (DoltHub is options-only).
 
 All public functions are async; blocking calls are offloaded to asyncio.to_thread.
 """
@@ -560,7 +562,8 @@ async def _fetch_dolt_chains(ticker: str, current_price: float | None) -> list[d
 async def get_options_chain(ticker: str) -> dict:
     """
     Returns current price, expirations, and options chain (calls+puts).
-    Priority: IB Gateway → DoltHub (EOD, full Greeks) → Yahoo Finance.
+    Priority: IB Gateway → DoltHub.  No yfinance chain fallback.
+    Price / HV / company metadata is always sourced from yfinance regardless.
     """
     try:
         from tools.ibkr_options import get_options_chain_ibkr
@@ -579,22 +582,21 @@ async def get_options_chain(ticker: str) -> dict:
     except Exception as exc:
         logger.debug("IBKR options import/call failed for %s: %s", ticker, exc)
 
-    # Fetch price/HV/company from yfinance regardless (DoltHub has no price data)
+    # Fetch price / HV / company metadata from yfinance (DoltHub is options-only)
     try:
         yf_data = await asyncio.to_thread(_fetch_options_chain_sync, ticker)
     except Exception as exc:
-        logger.error("get_options_chain(%s) yfinance failed: %s", ticker, exc)
+        logger.error("get_options_chain(%s) yfinance price fetch failed: %s", ticker, exc)
         return {"error": str(exc)}
 
-    # Overlay DoltHub chains (richer expirations + full Greeks)
+    # Options chains: DoltHub only — no yfinance fallback
     dolt_chains = await _fetch_dolt_chains(ticker, yf_data.get("current_price"))
     if dolt_chains:
         yf_data["chains"] = dolt_chains
         yf_data["available_expirations"] = [c["expiration"] for c in dolt_chains]
         yf_data["source"] = "DoltHub"
         logger.info("get_options_chain(%s): using DoltHub chains", ticker)
-    else:
-        yf_data["source"] = "Yahoo Finance"
-        logger.info("get_options_chain(%s): DoltHub unavailable, using yfinance chains", ticker)
+        return yf_data
 
-    return yf_data
+    logger.warning("get_options_chain(%s): DoltHub unavailable — no options data", ticker)
+    return {"error": f"No options chain data available for {ticker}. DoltHub has no recent EOD data for this symbol."}

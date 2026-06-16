@@ -74,20 +74,32 @@ MAX_BA_PCT = 0.50  # max bid-ask spread as fraction of mid (50%)
 
 
 def _is_liquid(row: dict) -> bool:
-    """True if this leg has an active two-sided market and sufficient open interest."""
-    bid = row.get("bid") or 0.0
-    ask = row.get("ask") or 0.0
-    if bid <= 0 or ask <= 0:          # must have a two-sided market
-        return False
-    mid = (bid + ask) / 2.0
-    if mid <= 0:
-        return False
-    if (ask - bid) / mid > MAX_BA_PCT:
-        return False
-    oi = row.get("openInterest")      # may be absent depending on data source
-    if oi is not None and float(oi) < MIN_OI:
-        return False
-    return True
+    """True if this leg has a usable price quote.
+
+    Primary path: real-time two-sided market (bid > 0, ask > 0) with spread ≤50%
+    and sufficient open interest.
+
+    Fallback: when bid/ask are zero (yfinance off-hours or data gaps), accept any
+    row with a non-zero lastPrice and skip the OI check — yfinance frequently
+    reports OI=0 for liquid strikes when markets are closed.
+    """
+    bid  = row.get("bid")  or 0.0
+    ask  = row.get("ask")  or 0.0
+    last = row.get("lastPrice") or 0.0
+
+    if bid > 0 and ask > 0:
+        mid = (bid + ask) / 2.0
+        if mid <= 0:
+            return False
+        if (ask - bid) / mid > MAX_BA_PCT:
+            return False
+        oi = row.get("openInterest")
+        if oi is not None and float(oi) < MIN_OI:
+            return False
+        return True
+
+    # Fallback: no live bid/ask — use lastPrice, skip OI check
+    return last > 0
 
 
 def _atm(strikes: list[float], price: float) -> float:
