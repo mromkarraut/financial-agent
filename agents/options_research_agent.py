@@ -19,6 +19,7 @@ import aiosqlite
 
 import config
 from agents.base_agent import AgentResult, BaseAgent
+from tools import html_components as hc
 from tools.market_data import get_options_chain
 from tools.options_math import (
     bs_delta, bs_theta_daily,
@@ -66,6 +67,27 @@ def _mid(row: dict) -> float:
     if a > 0:
         return round(a, 2)   # use ask alone when market maker quotes ask but no bid
     return round(last, 2)
+
+
+MIN_OI  = 100    # minimum open interest per leg
+MAX_BA_PCT = 0.50  # max bid-ask spread as fraction of mid (50%)
+
+
+def _is_liquid(row: dict) -> bool:
+    """True if this leg has an active two-sided market and sufficient open interest."""
+    bid = row.get("bid") or 0.0
+    ask = row.get("ask") or 0.0
+    if bid <= 0 or ask <= 0:          # must have a two-sided market
+        return False
+    mid = (bid + ask) / 2.0
+    if mid <= 0:
+        return False
+    if (ask - bid) / mid > MAX_BA_PCT:
+        return False
+    oi = row.get("openInterest")      # may be absent depending on data source
+    if oi is not None and float(oi) < MIN_OI:
+        return False
+    return True
 
 
 def _atm(strikes: list[float], price: float) -> float:
@@ -311,6 +333,8 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float,
             if not _is_vertical(b_strike, s_strike, b_row, s_row, exp):
                 return
             if abs(b_strike - s_strike) < MIN_SPREAD_WIDTH:
+                return
+            if not _is_liquid(b_row) or not _is_liquid(s_row):
                 return
             leg_sigma = (_sigma(b_row) + _sigma(s_row)) / 2
             s = _make_strategy(
@@ -569,10 +593,10 @@ def _fmt_detail_card(s: dict, price: float) -> str:
         scenarios = "<pre>" + "\n".join(scen_lines) + "</pre>"
 
         return (
-            f"<b>The Legs</b><br>\n  {legs_html}<br>\n<br>\n"
+            f'<div class="hc-hide-web"><b>The Legs</b><br>\n  {legs_html}<br>\n</div>\n'
             f"<b>How it works</b><br>\n  {n1}<br>\n  {n2}<br>\n  {n3}<br>\n<br>\n"
-            f"<b>Key Numbers</b>\n<pre>{table}</pre>"
-            f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}"
+            f'<div class="hc-hide-web"><b>Key Numbers</b>\n<pre>{table}</pre>'
+            f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}</div>"
         )
 
     # ── Two-leg: Long Straddle / Long Strangle ────────────────────────────────
@@ -632,12 +656,12 @@ def _fmt_detail_card(s: dict, price: float) -> str:
         scenarios = "<pre>" + "\n".join(scen_lines) + "</pre>"
 
         return (
-            f"<b>The Legs</b><br>\n"
-            f"  Buy a Call at <b>${call_s:.0f}</b><br>\n"
-            f"  Buy a Put at <b>${put_s:.0f}</b><br>\n<br>\n"
+            f'<div class="hc-hide-web"><b>The Legs</b><br>\n'
+            f'  Buy a Call at <b>${call_s:.0f}</b><br>\n'
+            f'  Buy a Put at <b>${put_s:.0f}</b><br>\n</div>\n'
             f"<b>How it works</b><br>\n  {n1}<br>\n  {n2}<br>\n  {n3}<br>\n<br>\n"
-            f"<b>Key Numbers</b>\n<pre>{table}</pre>"
-            f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}"
+            f'<div class="hc-hide-web"><b>Key Numbers</b>\n<pre>{table}</pre>'
+            f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}</div>"
         )
 
     # ── Vertical debit spread: Long Call Spread / Long Put Spread ─────────────
@@ -708,13 +732,89 @@ def _fmt_detail_card(s: dict, price: float) -> str:
     scenarios = "<pre>" + "\n".join(scen_lines) + "</pre>"
 
     return (
-        f"<b>The Legs</b><br>\n"
-        f"  {buy_leg}<br>\n"
-        f"  {sell_leg} <i>({prot})</i><br>\n<br>\n"
+        f'<div class="hc-hide-web"><b>The Legs</b><br>\n'
+        f'  {buy_leg}<br>\n  {sell_leg} <i>({prot})</i><br>\n</div>\n'
         f"<b>How it works</b><br>\n  {n1}<br>\n  {n2}<br>\n  {n3}<br>\n<br>\n"
-        f"<b>Key Numbers</b>\n<pre>{table}</pre>"
-        f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}"
+        f'<div class="hc-hide-web"><b>Key Numbers</b>\n<pre>{table}</pre>'
+        f"<b>Payoff at Expiration</b>  [{_fmt_exp(s['exp'])}]\n{scenarios}</div>"
     )
+
+
+def _fmt_profit_table(s: dict, price: float) -> str:
+    """
+    Dense price-by-price P&L table for the recommended vertical spread.
+    Works for bull_call and bear_put debit spreads.
+    Shows ~12 rows from below lower strike to above upper strike,
+    plus the current price, with % of max profit and outcome markers.
+    """
+    kind    = s["kind"]
+    is_call = kind == "bull_call"
+    lo      = min(s["buy_strike"], s["sell_strike"])
+    hi      = max(s["buy_strike"], s["sell_strike"])
+    width   = hi - lo
+    mp      = s["max_profit"]
+    ml      = s["max_loss"]
+    net     = abs(s["net"])
+    be      = s["breakeven"]
+
+    def _pnl(px: float) -> int:
+        if is_call:
+            v = (max(0, px - s["buy_strike"]) - max(0, px - s["sell_strike"]) - net) * 100
+        else:
+            v = (max(0, s["buy_strike"] - px) - max(0, s["sell_strike"] - px) - net) * 100
+        return int(round(v))
+
+    # Build ~12 evenly-spaced levels spanning lo-0.5*width … hi+0.5*width
+    pad   = width * 0.5
+    start = lo - pad
+    end   = hi + pad
+    step  = (end - start) / 11
+    levels = [round(start + i * step, 2) for i in range(12)]
+
+    # Force-add key prices and sort / deduplicate
+    for extra in (price, be, lo, hi):
+        closest = min(levels, key=lambda x: abs(x - extra))
+        if abs(closest - extra) > step * 0.25:
+            levels.append(round(extra, 2))
+    levels = sorted(set(round(x, 2) for x in levels))
+
+    hdr = f"{'Stock':>8}  {'P&L':>8}  {'% Max':>6}  {'':4}  Note"
+    sep = "─" * 52
+    rows = [hdr, sep]
+    for px in levels:
+        pnl     = _pnl(px)
+        pct_max = round(pnl / mp * 100) if mp else 0
+        pct_max = max(-99, min(100, pct_max))
+
+        if pnl >= mp:
+            note    = "max profit ✅"
+            pct_str = "100%"
+        elif pnl <= -ml:
+            note    = "max loss ❌"
+            pct_str = "   —"
+        elif abs(pnl) <= 2:
+            note    = "break-even"
+            pct_str = "  0%"
+        elif pnl > 0:
+            note    = "profit"
+            pct_str = f"{pct_max:3d}%"
+        else:
+            note    = "loss"
+            pct_str = "   —"
+
+        sign    = "+" if pnl >= 0 else "-"
+        pnl_str = f"{sign}${abs(pnl)}"
+
+        # Row markers
+        marker = "  "
+        if abs(px - price) < step * 0.15:
+            marker = "◀"          # current price
+        elif abs(px - be) < step * 0.15:
+            marker = "⬡"          # breakeven
+
+        rows.append(f"${px:>7.2f}  {pnl_str:>8}  {pct_str:>6}  {marker}    {note}")
+
+    return "<b>Profit Table</b> (per contract at expiration)\n<pre>" + "\n".join(rows) + "</pre>"
 
 
 def _fmt_order_button(s: dict, ticker: str) -> str:
@@ -722,6 +822,7 @@ def _fmt_order_button(s: dict, ticker: str) -> str:
         return ""   # order placement only implemented for 2-leg vertical spreads
     right       = "C" if "call" in s["kind"] else "P"
     net_display = f"-${s['max_loss']} debit"
+    suffix      = f"· {ticker} {right} {s['sell_strike']:.0f}/{s['buy_strike']:.0f} {s['exp']}"
     return (
         f'<div class="order-panel">'
         f'<div class="order-panel-label">📋 Recommended trade — place via IB Gateway</div>'
@@ -731,13 +832,14 @@ def _fmt_order_button(s: dict, ticker: str) -> str:
         f'<input type="hidden" name="long_strike"  value="{s["buy_strike"]}">'
         f'<input type="hidden" name="right"        value="{right}">'
         f'<input type="hidden" name="expiry"       value="{s["exp"]}">'
-        f'<input type="hidden" name="net_price"    value="{s["net"]}">'
+        f'<input type="hidden" name="net_price" class="calc-order-net-price" value="{s["net"]}">'
         f'<div class="order-row">'
         f'<label class="qty-label">Qty'
         f'<input type="number" name="quantity" value="1" min="1" max="100" class="qty-input">'
         f'</label>'
         f'<button type="submit" class="btn order-btn">📋 Stage in TWS — {s["name"]}</button>'
-        f'<span class="order-net">{net_display} · {ticker} {right} {s["sell_strike"]:.0f}/{s["buy_strike"]:.0f} {s["exp"]}</span>'
+        f'<span class="order-net calc-order-net-display" data-suffix="{suffix}">'
+        f'{net_display} {suffix}</span>'
         f'</div>'
         f'</form>'
         f'<div id="order-spinner" class="htmx-indicator order-spinner">⏳ Placing order…</div>'
@@ -797,6 +899,151 @@ def _pnl_chart(s: dict) -> str:
         )
 
 
+def _plotly_pnl_chart(s: dict, current_price: float) -> str:
+    """Return a Plotly HTML div for the strategy P&L at expiration (for web UI only)."""
+    try:
+        import numpy as np
+        import plotly.graph_objects as go
+    except ImportError:
+        return ""
+
+    kind = s["kind"]
+
+    # ── Price axis: tight range around the relevant strikes ──────────────────
+    strikes = [current_price]
+    for k in ("buy_strike", "sell_strike", "call_strike", "put_strike"):
+        v = s.get(k)
+        if v:
+            strikes.append(v)
+    lo = min(strikes) * 0.88
+    hi = max(strikes) * 1.12
+    prices = np.linspace(lo, hi, 500)
+
+    # ── P&L at expiration (per share, multiply by 100 for per-contract $) ───
+    if kind == "long_call":
+        pnl = np.maximum(prices - s["buy_strike"], 0) + s["net"]   # net < 0
+    elif kind == "long_put":
+        pnl = np.maximum(s["buy_strike"] - prices, 0) + s["net"]
+    elif kind == "bull_call":
+        debit = abs(s["net"])
+        pnl = (np.maximum(prices - s["buy_strike"], 0)
+               - np.maximum(prices - s["sell_strike"], 0)
+               - debit)
+    elif kind == "bear_put":
+        debit = abs(s["net"])
+        pnl = (np.maximum(s["buy_strike"] - prices, 0)
+               - np.maximum(s["sell_strike"] - prices, 0)
+               - debit)
+    elif kind in ("long_straddle", "long_strangle"):
+        call_s  = s.get("call_strike", s["buy_strike"])
+        put_s   = s.get("put_strike",  s["sell_strike"])
+        total   = s.get("total_debit", abs(s["net"]))
+        pnl = (np.maximum(prices - call_s, 0)
+               + np.maximum(put_s - prices, 0)
+               - total)
+    else:
+        return ""
+
+    pnl_dollars = pnl * 100   # per-contract P&L in $
+
+    fig = go.Figure()
+
+    # Shaded profit / loss regions
+    fig.add_trace(go.Scatter(
+        x=prices, y=np.maximum(pnl_dollars, 0),
+        fill="tozeroy", fillcolor="rgba(38,166,154,0.18)",
+        line=dict(color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=prices, y=np.minimum(pnl_dollars, 0),
+        fill="tozeroy", fillcolor="rgba(239,83,80,0.18)",
+        line=dict(color="rgba(0,0,0,0)"), showlegend=False, hoverinfo="skip",
+    ))
+
+    # Main P&L line
+    fig.add_trace(go.Scatter(
+        x=prices, y=pnl_dollars,
+        mode="lines", line=dict(color="#2196F3", width=2.5),
+        name="P&L at expiry",
+        hovertemplate="Stock $%{x:.2f} → %{y:+$.0f}<extra></extra>",
+    ))
+
+    # Zero line
+    fig.add_hline(y=0, line=dict(color="rgba(255,255,255,0.35)", width=1, dash="dot"))
+
+    # Current price
+    fig.add_vline(
+        x=current_price,
+        line=dict(color="rgba(255,255,255,0.5)", width=1, dash="dot"),
+        annotation_text=f"Now ${current_price:.2f}",
+        annotation_position="top left",
+        annotation_font_color="rgba(255,255,255,0.6)",
+    )
+
+    # Strike lines
+    STRIKE_COLOR = "#FFD700"
+    if kind in ("long_call", "long_put"):
+        fig.add_vline(x=s["buy_strike"], line=dict(color=STRIKE_COLOR, width=1.5, dash="dash"),
+                      annotation_text=f"Strike ${s['buy_strike']:.0f}",
+                      annotation_position="bottom right",
+                      annotation_font_color=STRIKE_COLOR)
+    elif kind in ("long_straddle", "long_strangle"):
+        call_s = s.get("call_strike", s["buy_strike"])
+        put_s  = s.get("put_strike",  s["sell_strike"])
+        for sv, lbl in [(call_s, f"Call ${call_s:.0f}"), (put_s, f"Put ${put_s:.0f}")]:
+            fig.add_vline(x=sv, line=dict(color=STRIKE_COLOR, width=1.5, dash="dash"),
+                          annotation_text=lbl, annotation_position="bottom right",
+                          annotation_font_color=STRIKE_COLOR)
+    else:
+        for sv, lbl in [
+            (s["buy_strike"],  f"Long ${s['buy_strike']:.0f}"),
+            (s["sell_strike"], f"Short ${s['sell_strike']:.0f}"),
+        ]:
+            fig.add_vline(x=sv, line=dict(color=STRIKE_COLOR, width=1.5, dash="dash"),
+                          annotation_text=lbl, annotation_position="bottom right",
+                          annotation_font_color=STRIKE_COLOR)
+
+    # Breakeven line(s)
+    BE_COLOR = "#4CAF50"
+    fig.add_vline(x=s["breakeven"], line=dict(color=BE_COLOR, width=1.5, dash="dash"),
+                  annotation_text=f"B/E ${s['breakeven']:.2f}",
+                  annotation_position="top right",
+                  annotation_font_color=BE_COLOR)
+    if s.get("breakeven_lower"):
+        fig.add_vline(x=s["breakeven_lower"], line=dict(color=BE_COLOR, width=1.5, dash="dash"),
+                      annotation_text=f"B/E ${s['breakeven_lower']:.2f}",
+                      annotation_position="top left",
+                      annotation_font_color=BE_COLOR)
+
+    # Max profit / max loss annotations on y-axis
+    mp, ml = s["max_profit"], s["max_loss"]
+    fig.update_layout(
+        title=dict(
+            text=f"P&L at Expiration — {s['name']} | {_fmt_exp(s['exp'])} | Max +${mp} / −${ml}",
+            font=dict(size=13),
+        ),
+        xaxis_title="Underlying Price at Expiration ($)",
+        yaxis_title="P&L per Contract ($)",
+        template="plotly_dark",
+        height=360,
+        margin=dict(l=50, r=30, t=55, b=50),
+        paper_bgcolor="#1a1a2e",
+        plot_bgcolor="#16213e",
+        showlegend=False,
+        xaxis=dict(gridcolor="#2a2a4a"),
+        yaxis=dict(gridcolor="#2a2a4a", tickprefix="$"),
+    )
+
+    # Emit a data-attribute div; enhanceOutput() in server.py calls Plotly.newPlot on it.
+    # Inline <script> tags inside HTMX innerHTML swaps don't execute in browsers,
+    # so we pass the spec as JSON and let the already-loaded Plotly in <head> render it.
+    import html as _html
+    spec = json.dumps({"data": fig.to_dict()["data"], "layout": fig.to_dict()["layout"]})
+    return (
+        '<div class="plotly-pnl-chart" data-spec="' + _html.escape(spec, quote=True) + '"></div>'
+    )
+
+
 # ── Memory ─────────────────────────────────────────────────────────────────────
 
 async def _load_memory(chat_id: str, ticker: str) -> dict | None:
@@ -848,6 +1095,285 @@ def _fmt_memory_note(prev: dict, current_price: float) -> str:
         )
     except Exception:
         return ""
+
+
+# ── Web-only styled output (hc-* design system) ──────────────────────────────
+
+def _web_header(
+    ticker: str, name: str, price: float, outlook: str,
+    atm_iv: float, ivr: float, hv_30d: float | None,
+    term_label: str, source_label: str,
+) -> str:
+    import html as _h
+    outlook_emoji = {"bullish": "📈", "bearish": "📉", "neutral": "↔️"}.get(outlook, "")
+    iv_str = f"{atm_iv*100:.1f}%" if atm_iv else "—"
+    metrics = [
+        {"label": "Price",   "value": f"${price:.2f}"},
+        {"label": "Outlook", "value": f"{outlook_emoji} {outlook.capitalize()}",
+         "color": "pos" if outlook == "bullish" else ("neg" if outlook == "bearish" else "yellow")},
+        {"label": "IVR",     "value": f"{ivr:.0f}",
+         "color": "neg" if ivr >= 50 else "pos"},
+        {"label": "IVx",     "value": iv_str},
+    ]
+    if hv_30d:
+        metrics.append({"label": "HV30", "value": f"{hv_30d*100:.1f}%"})
+    title  = f"{_h.escape(name)} ({_h.escape(ticker)}) — {_h.escape(term_label)}"
+    footer = f'<div class="hc-card-footer">Data: {_h.escape(source_label)}</div>'
+    return (
+        f'<div class="hc-section" style="margin-bottom:14px">'
+        f'<div class="hc-section-header">{title}</div>'
+        f'<div class="hc-section-body">{hc.metric_grid(metrics)}</div>'
+        f'{footer}'
+        f'</div>'
+    )
+
+
+def _web_exp_selector(chains: list[dict], price: float) -> str:
+    headers = ["Expiry", "DTE", "IVx", "Exp Move", ""]
+    rows: list[list] = []; row_cls: list[str] = []
+    for chain in chains[:5]:
+        exp   = chain["expiration"]
+        dte   = _dte(exp)
+        calls = chain.get("calls", [])
+        puts  = chain.get("puts",  [])
+        all_s = _chain_strikes(calls, puts)
+        atm   = _atm(all_s, price) if all_s else None
+        cm    = {r["strike"]: r for r in calls}
+        pm    = {r["strike"]: r for r in puts}
+        iv_str = "—"; em_str = "—"
+        if atm:
+            ac = cm.get(atm, {}); ap = pm.get(atm, {})
+            iv = ac.get("impliedVolatility") or ap.get("impliedVolatility")
+            if iv:
+                iv_str = f"{iv*100:.0f}%"
+            ac_mid = _mid(ac); ap_mid = _mid(ap)
+            if ac_mid and ap_mid:
+                em_str = f"±${expected_move(ac_mid, ap_mid):.2f}"
+        if dte <= 7:
+            tag = hc.badge("weekly", "red")
+        elif 21 <= dte <= 50:
+            tag = hc.badge("sweet spot", "green")
+        else:
+            tag = ""
+        rows.append([_fmt_exp(exp), f"{dte}d", iv_str, em_str, tag])
+        row_cls.append("hc-row-current" if 21 <= dte <= 50 else "")
+    return hc.section_card("Expirations", hc.data_table(headers, rows, row_cls), "📅")
+
+
+def _web_chain_table(chain: dict, price: float) -> str:
+    exp     = chain["expiration"]
+    dte     = _dte(exp)
+    T       = dte / 365.0
+    calls_l = sorted([r for r in chain.get("calls", []) if r.get("strike")], key=lambda r: r["strike"])
+    puts_l  = sorted([r for r in chain.get("puts",  []) if r.get("strike")], key=lambda r: r["strike"])
+    if not calls_l and not puts_l:
+        return ""
+    all_s = _chain_strikes(calls_l, puts_l)
+    atm   = _atm(all_s, price) if all_s else None
+    cm    = {r["strike"]: r for r in calls_l}
+    pm    = {r["strike"]: r for r in puts_l}
+    if atm:
+        idx = all_s.index(atm)
+        sel = all_s[max(0, idx - 2): idx + 3]
+    else:
+        sel = all_s[:5]
+
+    headers = ["C Δ", "C Bid", "C Ask", "Strike", "P Bid", "P Ask", "P Δ"]
+    rows: list[list] = []; row_cls: list[str] = []
+    for s in sel:
+        cr    = cm.get(s, {}); pr = pm.get(s, {})
+        sigma = cr.get("impliedVolatility") or pr.get("impliedVolatility") or 0.30
+        cd    = bs_delta(price, s, T, sigma, is_call=True)
+        pd_v  = bs_delta(price, s, T, sigma, is_call=False)
+        cb    = cr.get("bid") or 0; ca = cr.get("ask") or 0
+        pb    = pr.get("bid") or 0; pa = pr.get("ask") or 0
+        is_atm = s == atm
+        strike_cell = f"<b>${s:.0f} ◀ATM</b>" if is_atm else f"${s:.0f}"
+        rows.append([f"{cd:.2f}", f"{cb:.2f}", f"{ca:.2f}",
+                     strike_cell, f"{pb:.2f}", f"{pa:.2f}", f"{pd_v:.2f}"])
+        row_cls.append("hc-row-current" if is_atm else "")
+    return hc.section_card(
+        f"Chain — {_fmt_exp(exp)} ({dte}d)",
+        hc.data_table(headers, rows, row_cls), "🔗"
+    )
+
+
+def _web_comparison(strategies: list[dict], best_num: str) -> str:
+    headers = ["#", "Strategy", "Strikes", "Exp", "POP", "P50", "Net", "ROC"]
+    rows: list[list] = []; row_cls: list[str] = []
+    for s in strategies:
+        kind = s["kind"]
+        if "call" in kind:
+            strikes = f"${s['sell_strike']:.0f}/${s['buy_strike']:.0f}C"
+        else:
+            strikes = f"${s['buy_strike']:.0f}/${s['sell_strike']:.0f}P"
+        is_best   = s["num"] == best_num
+        name_cell = f"<b>{s['name']}</b>" if is_best else s["name"]
+        roc_cell  = f"{s['roc']:.0f}%"   + (" ⭐" if is_best else "")
+        net_str   = f"-${s['max_loss']}"
+        pop_cls   = "pos" if s["pop"] >= 0.5 else "neg"
+        pop_cell  = f'<span class="{pop_cls}">{s["pop"]*100:.0f}%</span>'
+        rows.append([s["num"], name_cell, strikes,
+                     _fmt_exp(s["exp"], short=True), pop_cell,
+                     f"{s['p50']*100:.0f}%", net_str, roc_cell])
+        row_cls.append("hc-row-max" if is_best else "")
+    return hc.section_card("5 Strategies Compared", hc.data_table(headers, rows, row_cls), "📊")
+
+
+def _web_recommendation_header(best: dict, outlook: str) -> str:
+    pop_pct = f"{best['pop']*100:.0f}%"
+    p50_pct = f"{best['p50']*100:.0f}%"
+    metrics = [
+        {"label": "Expiry",     "value": _fmt_exp(best["exp"])},
+        {"label": "DTE",        "value": f"{best['dte']}d"},
+        {"label": "POP",        "value": pop_pct,
+         "color": "pos" if best["pop"] >= 0.5 else "neg"},
+        {"label": "P50",        "value": p50_pct},
+        {"label": "Max Profit", "value": f"+${best['max_profit']}", "color": "pos"},
+        {"label": "Max Loss",   "value": f"-${best['max_loss']}",   "color": "neg"},
+        {"label": "ROC",        "value": f"{best['roc']:.0f}%"},
+        {"label": "Theta/day",  "value": f"{'+' if best['pos_theta'] >= 0 else ''}${best['pos_theta']:.2f}"},
+        {"label": "Delta",      "value": f"{best['pos_delta']:+.3f}"},
+    ]
+    return hc.section_card(
+        f"🏆 Recommended: {best['num']} {best['name']}",
+        hc.metric_grid(metrics),
+    )
+
+
+def _web_how_it_works(s: dict) -> str:
+    kind      = s["kind"]
+    per_share = f"${abs(s['net']):.2f}"
+    per_cont  = f"${abs(int(s['net'] * 100))}"
+    if kind == "bull_call":
+        n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to profit from a rise."
+        n2 = f"The trade becomes profitable if the stock rises <b>above ${s['breakeven']}</b> at expiration."
+        n3 = f"Maximum gain of <b>${s['max_profit']}</b> is locked in above ${s['sell_strike']:.0f}."
+    elif kind == "bear_put":
+        n1 = f"You pay {per_share}/share ({per_cont}/contract) for the right to profit from a decline."
+        n2 = f"The trade becomes profitable if the stock falls <b>below ${s['breakeven']}</b> at expiration."
+        n3 = f"Maximum gain of <b>${s['max_profit']}</b> is locked in below ${s['sell_strike']:.0f}."
+    else:
+        return ""
+    body = (
+        f'<div style="padding:12px 16px;font-size:13px;line-height:1.8">'
+        f'{n1}<br><br>{n2}<br><br>{n3}'
+        f'</div>'
+    )
+    return hc.section_card("How It Works", body, "💡")
+
+
+def _web_debit_calculator(s: dict, price: float) -> str:
+    """Interactive debit-price calculator for a vertical spread (web only)."""
+    kind = s.get("kind", "")
+    if kind not in ("bull_call", "bear_put"):
+        return ""
+    spread = round(abs(s["sell_strike"] - s["buy_strike"]), 2)
+    debit  = abs(s["net"])
+    max_db = round(spread - 0.01, 2)
+    return (
+        f'<div class="hc-section calc-panel"'
+        f' data-kind="{kind}"'
+        f' data-buy="{s["buy_strike"]}"'
+        f' data-sell="{s["sell_strike"]}"'
+        f' data-spread="{spread}"'
+        f' data-debit="{debit:.2f}"'
+        f' data-buy-price="{s["buy_price"]:.2f}"'
+        f' data-sell-price="{s["sell_price"]:.2f}"'
+        f' data-pop="{s["pop"]:.4f}"'
+        f' data-p50="{s["p50"]:.4f}"'
+        f' data-delta="{s["pos_delta"]:.4f}"'
+        f' data-theta="{s["pos_theta"]:.4f}"'
+        f' data-price="{price:.2f}"'
+        f' data-exp="{s["exp"]}">'
+        f'<div class="hc-section-header">💲 Debit Calculator — adjust entry price</div>'
+        f'<div class="hc-section-body">'
+        f'<div class="calc-controls">'
+        f'<span class="calc-label">Net Debit / share</span>'
+        f'<input type="range" class="calc-slider"'
+        f' min="0.05" max="{max_db}" step="0.05" value="{debit:.2f}">'
+        f'<input type="number" class="calc-input"'
+        f' min="0.05" max="{max_db}" step="0.05" value="{debit:.2f}">'
+        f'<span class="calc-orig">market mid: ${debit:.2f}</span>'
+        f'</div>'
+        f'<div class="calc-metrics hc-metric-grid"></div>'
+        f'</div>'
+        f'</div>'
+    )
+
+
+def _build_web_output(
+    ticker: str, name: str, price: float, outlook: str,
+    atm_iv: float, ivr: float, hv_30d: float | None,
+    term_label: str, source_label: str,
+    chains: list[dict], strategies: list[dict], best: dict | None,
+    dte_note: str | None = None, prev: dict | None = None,
+) -> str:
+    """Fully-styled HTML for web using hc-* design system. Never sent to Telegram."""
+    parts: list[str] = []
+
+    parts.append(_web_header(
+        ticker, name, price, outlook, atm_iv, ivr, hv_30d, term_label, source_label,
+    ))
+
+    if dte_note:
+        level = "warning" if "⚠" in dte_note else "info"
+        parts.append(hc.alert(dte_note, level))
+
+    if chains:
+        parts.append(_web_exp_selector(chains, price))
+        ct = _web_chain_table(chains[0], price)
+        if ct:
+            parts.append(ct)
+
+    if strategies:
+        best_num = best["num"] if best else ""
+        parts.append(_web_comparison(strategies, best_num))
+
+    if best:
+        parts.append(_web_recommendation_header(best, outlook))
+
+        calc = _web_debit_calculator(best, price)
+        if calc:
+            parts.append(calc)
+
+        legs = hc.strategy_legs_card(best)
+        if legs:
+            parts.append(legs)
+
+        how = _web_how_it_works(best)
+        if how:
+            parts.append(how)
+
+        key_nums = hc.key_numbers_table(best)
+        if key_nums:
+            parts.append(f'<div class="calc-kn-wrap">{key_nums}</div>')
+
+        profit = hc.profit_table(best, price)
+        if profit:
+            parts.append(f'<div class="calc-pt-wrap">{profit}</div>')
+
+        plotly_div = _plotly_pnl_chart(best, price)
+        if plotly_div:
+            parts.append(hc.section_card("P&L Chart — interactive", plotly_div, "📈"))
+
+        order_btn = _fmt_order_button(best, ticker)
+        if order_btn:
+            parts.append(order_btn)
+    else:
+        parts.append(hc.alert("Could not compute strategies — insufficient chain data.", "error"))
+
+    if prev:
+        note = _fmt_memory_note(prev, price)
+        if note:
+            parts.append(f'<div style="margin-top:8px;font-size:13px">{note}</div>')
+
+    parts.append(
+        '<div style="margin-top:12px;font-size:12px;color:var(--dim)">'
+        '<i>Educational only — not financial advice.</i>'
+        '</div>'
+    )
+    return "\n".join(filter(None, parts))
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
@@ -999,7 +1525,7 @@ class OptionsResearchAgent(BaseAgent):
                 )
                 parts.append(f"\n<b>Trade Structure</b><br>")
                 parts.append(_fmt_detail_card(best, price))
-                parts.append(f"<pre>{_pnl_chart(best)}</pre>")
+                parts.append(f'<div class="hc-hide-web"><pre>{_pnl_chart(best)}</pre></div>')
                 parts.append(_fmt_order_button(best, ticker))
             else:
                 parts.append("<i>Could not compute strategies — insufficient chain data.</i>")
@@ -1019,20 +1545,33 @@ class OptionsResearchAgent(BaseAgent):
 
             output = "\n".join(parts)
 
-            # Save this research to memory (including rendered HTML for web UI)
+            # ── Fully-styled web output using hc-* design system ─────────────
+            web_output = _build_web_output(
+                ticker=ticker, name=name, price=price, outlook=outlook,
+                atm_iv=atm_iv, ivr=ivr, hv_30d=hv_30d,
+                term_label=term_label, source_label=source_label,
+                chains=chains, strategies=strategies, best=best,
+                dte_note=dte_note, prev=prev,
+            )
+
+            # Save this research to memory
             if chat_id and best:
                 await _save_memory(
                     chat_id=chat_id, ticker=ticker, price=price,
                     outlook=outlook, ivr=ivr,
                     recommended=f"{best['name']} {best['exp']}",
                     strategies=strategies,
-                    output_html=output,
+                    output_html=web_output,
                 )
 
             return AgentResult(
                 agent=self.name, version=self.version,
                 output=output, confidence=0.92,
-                metadata={"market_data": mkt, "outlook": outlook, "strategies": len(strategies)},
+                metadata={
+                    "market_data": mkt, "outlook": outlook,
+                    "strategies": len(strategies),
+                    "web_output": web_output,
+                },
             )
 
         except Exception as exc:

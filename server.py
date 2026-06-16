@@ -130,7 +130,8 @@ async def search(
     history = await _get_history()
     new_id  = history[0]["id"] if history else None
 
-    body = fund_card + result["output"]
+    web_output = result.get("metadata", {}).get("web_output", "")
+    body = fund_card + (web_output if web_output else result["output"])
     results_html = f'<div class="result-wrap">{body}</div>'
     sidebar_html = (f'<div id="history-list" hx-swap-oob="true">'
                     f'{_sidebar_items(history, active_id=new_id)}</div>')
@@ -759,6 +760,155 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
   background: none; border: none; padding: 0; margin: 0; font-size: 12px;
 }
 
+/* ── HTML/CSS Agent design system (hc-*) ────────────────────────────── */
+
+/* Section card */
+.hc-section {
+  margin: 14px 0; border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+  background: var(--bg2);
+}
+.hc-section-header {
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border);
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.09em; color: var(--dim);
+}
+.hc-section-body { padding: 0; }
+
+/* Badge */
+.hc-badge {
+  display: inline-flex; align-items: center;
+  padding: 2px 8px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; font-family: var(--mono);
+  white-space: nowrap;
+}
+.hc-badge-green  { background: rgba(0,200,5,0.12);   color: var(--green);  }
+.hc-badge-red    { background: rgba(255,80,0,0.12);  color: var(--red);    }
+.hc-badge-yellow { background: rgba(245,197,24,0.12);color: var(--yellow); }
+.hc-badge-blue   { background: rgba(56,125,255,0.12);color: var(--blue);   }
+.hc-badge-dim    { background: var(--bg3);            color: var(--dim);    }
+
+/* Metric grid */
+.hc-metric-grid {
+  display: flex; flex-wrap: wrap; gap: 6px 20px;
+  padding: 14px 16px;
+}
+.hc-metric { display: flex; flex-direction: column; gap: 3px; min-width: 62px; }
+.hc-metric-label {
+  font-size: 10px; font-weight: 700; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.hc-metric-value {
+  font-size: 15px; font-weight: 700; font-family: var(--mono); color: var(--text);
+}
+.hc-metric-value.pos    { color: var(--green);  }
+.hc-metric-value.neg    { color: var(--red);    }
+.hc-metric-value.dim    { color: var(--dim);    }
+.hc-metric-value.yellow { color: var(--yellow); }
+.hc-metric-value.blue   { color: var(--blue);   }
+
+/* Option legs */
+.hc-legs { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
+.hc-leg  {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px;
+}
+.hc-leg-action {
+  font-size: 10px; font-weight: 800; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 4px; flex-shrink: 0;
+  letter-spacing: 0.07em;
+}
+.hc-leg-action.buy  { background: rgba(0,200,5,0.12);  color: var(--green); }
+.hc-leg-action.sell { background: rgba(255,80,0,0.12); color: var(--red);   }
+.hc-leg-strike { font-family: var(--mono); font-weight: 700; }
+.hc-leg-price  { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+.hc-leg-note   { font-size: 11px; color: var(--dim); }
+.hc-legs-footer {
+  margin-top: 6px; padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--dim);
+}
+
+/* Data table */
+.hc-table-wrap { overflow-x: auto; }
+.hc-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 13px; font-family: var(--mono);
+}
+.hc-table th {
+  padding: 8px 14px; text-align: right;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--dim);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.hc-table th:first-child { text-align: left; }
+.hc-table td {
+  padding: 7px 14px; text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.hc-table td:first-child { text-align: left; color: var(--dim); font-weight: 500; }
+.hc-table tr:last-child td { border-bottom: none; }
+
+/* Row states */
+.hc-row-profit td:nth-child(2)  { color: var(--green); font-weight: 700; }
+.hc-row-loss   td:nth-child(2)  { color: var(--red); }
+.hc-row-current { background: rgba(56,125,255,0.07); }
+.hc-row-current td:first-child  { color: var(--blue); font-weight: 700; }
+.hc-row-be      { background: rgba(245,197,24,0.06); }
+.hc-row-be td:first-child       { color: var(--yellow); }
+.hc-row-max     { background: rgba(0,200,5,0.06); }
+.hc-row-max td:first-child      { color: var(--green); }
+
+/* Alert */
+.hc-alert {
+  padding: 10px 14px; border-radius: 8px;
+  font-size: 13px; margin: 10px 0; border-left: 3px solid;
+}
+.hc-alert-info    { background: rgba(56,125,255,0.07);  border-color: var(--blue);   }
+.hc-alert-warning { background: rgba(245,197,24,0.07);  border-color: var(--yellow); }
+.hc-alert-success { background: rgba(0,200,5,0.07);     border-color: var(--green);  }
+.hc-alert-error   { background: rgba(255,80,0,0.07);    border-color: var(--red);    }
+
+/* Plotly chart inside hc-section */
+.hc-section .plotly-pnl-chart { display: block; }
+
+/* Hide Telegram-only blocks on web (ASCII chart, pre Key Numbers, pre Payoff, pre Legs) */
+.result-wrap .hc-hide-web { display: none; }
+
+/* ── Debit calculator ── */
+.calc-controls {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px 10px; flex-wrap: wrap;
+}
+.calc-label { font-size: 12px; font-weight: 600; color: var(--dim); white-space: nowrap; }
+.calc-slider { flex: 1; min-width: 120px; accent-color: var(--green); cursor: pointer; height: 4px; }
+.calc-input {
+  width: 80px; background: var(--bg2);
+  border: 1.5px solid var(--border); border-radius: 7px;
+  color: var(--text); font-size: 14px; font-weight: 700;
+  padding: 5px 8px; outline: none; text-align: center;
+  font-family: var(--mono); transition: border-color var(--ease);
+}
+.calc-input:focus { border-color: var(--green); }
+.calc-orig { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.calc-metrics { padding: 2px 16px 14px; }
+
+/* Fundamentals mini-card extras */
+.hc-fund-card { margin-bottom: 18px; }
+.hc-fund-sub  { font-weight: 400; font-size: 12px; color: var(--dim); margin-left: 6px; }
+.hc-card-footer {
+  padding: 8px 16px; font-size: 11px; color: var(--dim);
+  border-top: 1px solid var(--border);
+}
+.hc-source-link {
+  color: var(--dim); text-decoration: none;
+  border-bottom: 1px dotted var(--dim); transition: color var(--ease);
+}
+.hc-source-link:hover { color: var(--text); }
+
 /* ── Positions page ── */
 .pos-page        { padding: 24px; max-width: 1100px; margin: 0 auto; }
 .pos-live-wrap   { margin-bottom: 28px; }
@@ -952,9 +1102,10 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
 
 
 async def _fundamentals_card(ticker: str) -> str:
-    """Compact fundamentals summary card — fetched in parallel with options analysis."""
+    """Compact fundamentals summary card using hc-* design system."""
     try:
         from tools.market_data import get_fundamentals
+        from tools import html_components as hc
         data = await asyncio.wait_for(get_fundamentals(ticker), timeout=12)
         if "error" in data:
             return ""
@@ -965,48 +1116,53 @@ async def _fundamentals_card(ticker: str) -> str:
             except (TypeError, ValueError):
                 return "—"
 
-        mcap   = data.get("market_cap")
-        mcap_s = f"${mcap/1e9:.1f}B" if mcap and mcap >= 1e9 else (f"${mcap/1e6:.0f}M" if mcap else "—")
-        pe     = _f(data.get("pe_ratio"),              ".1f")
-        fpe    = _f(data.get("forward_pe"),             ".1f")
-        rev    = _f(data.get("revenue_growth_yoy_pct"), ".1f", "%")
-        margin = _f(data.get("profit_margin_pct"),      ".1f", "%")
-        de     = _f(data.get("debt_to_equity"),         ".1f")
-        roe    = _f(data.get("roe_pct"),                ".1f", "%")
-        div    = data.get("dividend_yield_pct") or 0
-        div_s  = _f(div, ".2f", "%") if div and float(div) > 0 else None
-        sector = data.get("sector") or ""
-        ind    = data.get("industry") or ""
-        name   = data.get("company_name", ticker)
+        def _color(v, positive_good: bool = True) -> str:
+            try:
+                f = float(v)
+                if f > 0: return "pos" if positive_good else "neg"
+                if f < 0: return "neg" if positive_good else "pos"
+            except (TypeError, ValueError):
+                pass
+            return ""
+
+        mcap    = data.get("market_cap")
+        mcap_s  = (f"${mcap/1e9:.1f}B" if mcap and mcap >= 1e9
+                   else f"${mcap/1e6:.0f}M" if mcap else "—")
+        name    = data.get("company_name", ticker)
+        sector  = data.get("sector") or ""
+        ind     = data.get("industry") or ""
+        sub     = " · ".join(filter(None, [sector, ind]))
+        rev_yoy = data.get("revenue_growth_yoy_pct")
+        margin  = data.get("profit_margin_pct")
+        div     = data.get("dividend_yield_pct") or 0
 
         metrics = [
-            ("Mkt Cap",    mcap_s),
-            ("P/E",        pe),
-            ("Fwd P/E",    fpe),
-            ("Rev YoY",    rev),
-            ("Net Margin", margin),
-            ("D/E",        de),
-            ("ROE",        roe),
+            {"label": "Mkt Cap",    "value": mcap_s},
+            {"label": "P/E",        "value": _f(data.get("pe_ratio"))},
+            {"label": "Fwd P/E",    "value": _f(data.get("forward_pe"))},
+            {"label": "Rev YoY",    "value": _f(rev_yoy, ".1f", "%"),
+             "color": _color(rev_yoy)},
+            {"label": "Net Margin", "value": _f(margin, ".1f", "%"),
+             "color": _color(margin)},
+            {"label": "D/E",        "value": _f(data.get("debt_to_equity"))},
+            {"label": "ROE",        "value": _f(data.get("roe_pct"), ".1f", "%"),
+             "color": _color(data.get("roe_pct"))},
         ]
-        if div_s:
-            metrics.append(("Div Yield", div_s))
+        if div and float(div) > 0:
+            metrics.append({"label": "Div Yield", "value": _f(div, ".2f", "%")})
 
-        chips = "".join(
-            f'<span class="fund-metric"><span class="fund-label">{lbl}</span>{val}</span>'
-            for lbl, val in metrics
-        )
-        sub    = " · ".join(filter(None, [sector, ind]))
-        source = data.get("source", "Yahoo Finance")
-        src_url = data.get("source_url", "")
-        src_link = (f'<a href="{src_url}" target="_blank" class="fund-source">{source}</a>'
-                    if src_url else f'<span class="fund-source">{source}</span>')
+        source   = data.get("source", "Yahoo Finance")
+        src_url  = data.get("source_url", "")
+        src_link = (f'<a href="{src_url}" target="_blank" class="hc-source-link">{source}</a>'
+                    if src_url else source)
+        sub_html = (f' <span class="hc-fund-sub">{sub}</span>' if sub else "")
+        footer   = f'<div class="hc-card-footer">Source: {src_link}</div>'
+
         return (
-            f'<div class="fund-card">'
-            f'<div class="fund-name">{name}'
-            f'{"  <span class=\"fund-sub\">" + sub + "</span>" if sub else ""}'
-            f'</div>'
-            f'<div class="fund-metrics">{chips}</div>'
-            f'<div class="fund-footer">Source: {src_link}</div>'
+            f'<div class="hc-section hc-fund-card">'
+            f'<div class="hc-section-header">{name}{sub_html}</div>'
+            f'{hc.metric_grid(metrics)}'
+            f'{footer}'
             f'</div>'
         )
     except Exception:
@@ -1465,6 +1621,168 @@ def _page(history: list[dict], active_tab: str = "search",
           .replace(/(\\+\\$[\\d,.]+)/g, '<span class="pos">$1</span>')
           .replace(/(-\\$[\\d,.]+)/g,  '<span class="neg">$1</span>')
           .replace(/\\b(\\d{{1,3}}%)/g, '<span class="pct">$1</span>');
+      }});
+      document.querySelectorAll('.plotly-pnl-chart:not([data-init])').forEach(el => {{
+        el.setAttribute('data-init', '1');
+        try {{
+          const spec = JSON.parse(el.dataset.spec);
+          Plotly.newPlot(el, spec.data, spec.layout, {{responsive: true, displayModeBar: false}});
+        }} catch(e) {{ console.error('Plotly P&L init failed', e); }}
+      }});
+      document.querySelectorAll('.calc-panel:not([data-init])').forEach(el => {{
+        el.setAttribute('data-init', '1');
+        const kind       = el.dataset.kind;
+        const buyStrike  = parseFloat(el.dataset.buy);
+        const sellStrike = parseFloat(el.dataset.sell);
+        const spread     = parseFloat(el.dataset.spread);
+        const origDebit  = parseFloat(el.dataset.debit);
+        const buyPrice   = parseFloat(el.dataset.buyPrice  || 0);
+        const sellPrice  = parseFloat(el.dataset.sellPrice || 0);
+        const pop        = parseFloat(el.dataset.pop   || 0);
+        const p50v       = parseFloat(el.dataset.p50   || 0);
+        const delta      = parseFloat(el.dataset.delta || 0);
+        const theta      = parseFloat(el.dataset.theta || 0);
+        const curPrice   = parseFloat(el.dataset.price || buyStrike);
+        const wrap       = el.closest('.result-wrap');
+        const slider     = el.querySelector('.calc-slider');
+        const numInput   = el.querySelector('.calc-input');
+        const metrics    = el.querySelector('.calc-metrics');
+
+        function m(label, val, cls) {{
+          return '<div class="hc-metric"><div class="hc-metric-label">' + label + '</div>'
+               + '<div class="hc-metric-value' + (cls ? ' '+cls : '') + '">' + val + '</div></div>';
+        }}
+        function pnlSpan(v, cls) {{ return '<span class="' + cls + '">' + v + '</span>'; }}
+        function row(lbl, val, cls) {{
+          return '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + lbl + '</td><td>' + val + '</td></tr>';
+        }}
+
+        function buildKN(debit) {{
+          const maxP = Math.round((spread - debit) * 100);
+          const maxL = Math.round(debit * 100);
+          const roc  = (maxP / maxL * 100).toFixed(1);
+          const be   = (kind === 'bull_call' ? buyStrike + debit : buyStrike - debit).toFixed(2);
+          const opt  = kind === 'bull_call' ? 'Call' : 'Put';
+          const lp   = '<span class="hc-leg-price">';
+          const lpe  = '</span>';
+          const popC = pop >= 0.5 ? 'pos' : 'neg';
+          let t = '<div class="hc-table-wrap"><table class="hc-table">'
+                + '<thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';
+          t += row('Buy '  + opt, '$' + buyStrike.toFixed(0)  + ' ' + lp + '@ $' + buyPrice.toFixed(2)  + '/sh' + lpe, '');
+          t += row('Sell ' + opt, '$' + sellStrike.toFixed(0) + ' ' + lp + '@ $' + sellPrice.toFixed(2) + '/sh' + lpe, '');
+          t += row('Net debit',  pnlSpan('-$' + debit.toFixed(2), 'neg') + ' ' + lp + '($' + maxL + '/contract)' + lpe, 'hc-row-loss');
+          t += row('Break-even', '$' + be, 'hc-row-be');
+          t += row('POP',        pnlSpan((pop*100).toFixed(0) + '%', popC), '');
+          t += row('P50',        (p50v*100).toFixed(0) + '%', '');
+          t += row('Max profit', pnlSpan('+$' + maxP, 'pos'), 'hc-row-profit');
+          t += row('Max loss',   pnlSpan('-$' + maxL, 'neg'), 'hc-row-loss');
+          t += row('ROC',        roc + '%', '');
+          t += row('Theta',      (theta >= 0 ? '+' : '') + '$' + Math.abs(theta).toFixed(2) + '/day', '');
+          t += row('Delta',      (delta >= 0 ? '+' : '') + delta.toFixed(3), '');
+          t += row('Spread',     '$' + spread.toFixed(0), '');
+          return t + '</tbody></table></div>';
+        }}
+
+        function buildPT(debit) {{
+          const lo   = Math.min(buyStrike, sellStrike);
+          const hi   = Math.max(buyStrike, sellStrike);
+          const maxP = Math.round((spread - debit) * 100);
+          const maxL = Math.round(debit * 100);
+          const be   = kind === 'bull_call' ? buyStrike + debit : buyStrike - debit;
+          const pad  = spread * 0.5;
+          const step = (hi + pad - (lo - pad)) / 11;
+          let levels = [];
+          for (let i = 0; i < 12; i++) levels.push(Math.round((lo - pad + i * step) * 100) / 100);
+          [curPrice, be, lo, hi].forEach(function(x) {{
+            const mn = Math.min.apply(null, levels.map(function(l) {{ return Math.abs(l - x); }}));
+            if (mn > step * 0.25) levels.push(Math.round(x * 100) / 100);
+          }});
+          levels = levels.filter(function(v, i, a) {{ return a.indexOf(v) === i; }}).sort(function(a, b) {{ return a - b; }});
+          function pnl(px) {{
+            const v = kind === 'bull_call'
+              ? (Math.max(0, px - buyStrike) - Math.max(0, px - sellStrike) - debit) * 100
+              : (Math.max(0, buyStrike - px) - Math.max(0, sellStrike - px) - debit) * 100;
+            return Math.round(v);
+          }}
+          let t = '<div class="hc-table-wrap"><table class="hc-table"><thead><tr>'
+                + '<th>Price</th><th>P&amp;L / contract</th><th>% of Max</th><th></th>'
+                + '</tr></thead><tbody>';
+          for (let i = 0; i < levels.length; i++) {{
+            const px = levels[i];
+            const p  = pnl(px);
+            const isCurr = Math.abs(px - curPrice) < step * 0.15;
+            const isBe   = Math.abs(px - be)       < step * 0.15;
+            let label, pctStr, cls;
+            if      (p >= maxP)        {{ label = 'max profit ✅'; pctStr = '100%'; cls = 'hc-row-max hc-row-profit'; }}
+            else if (p <= -maxL)       {{ label = 'max loss ❌';   pctStr = '—'; cls = 'hc-row-loss'; }}
+            else if (Math.abs(p) <= 2) {{ label = 'break-even';        pctStr = '0%';   cls = 'hc-row-be'; }}
+            else if (p > 0)            {{ label = 'profit';            pctStr = Math.round(p/maxP*100) + '%'; cls = 'hc-row-profit'; }}
+            else                       {{ label = 'loss';              pctStr = '—'; cls = 'hc-row-loss'; }}
+            if (isCurr) {{ cls += ' hc-row-current'; label = '◄ now  ' + label; }}
+            else if (isBe) cls += ' hc-row-be';
+            const sign = p >= 0 ? '+' : '';
+            t += '<tr class="' + cls.trim() + '"><td>$' + px.toFixed(2) + '</td><td>'
+               + sign + '$' + Math.abs(p) + '</td><td>' + pctStr + '</td><td>' + label + '</td></tr>';
+          }}
+          return t + '</tbody></table></div>';
+        }}
+
+        function updatePlotly(debit) {{
+          const pEl = wrap && wrap.querySelector('.plotly-pnl-chart[data-init]');
+          if (!pEl || !window.Plotly || !pEl.data || pEl.data.length < 3) return;
+          const lo = Math.min(buyStrike, sellStrike, curPrice) * 0.88;
+          const hi = Math.max(buyStrike, sellStrike, curPrice) * 1.12;
+          const xs = [];
+          for (let i = 0; i < 300; i++) xs.push(lo + (hi - lo) * i / 299);
+          const ys = xs.map(function(p) {{
+            return kind === 'bull_call'
+              ? (Math.max(0, p - buyStrike) - Math.max(0, p - sellStrike) - debit) * 100
+              : (Math.max(0, buyStrike - p) - Math.max(0, sellStrike - p) - debit) * 100;
+          }});
+          try {{
+            Plotly.react(pEl, [
+              Object.assign({{}}, pEl.data[0], {{x: xs, y: ys.map(function(y) {{ return Math.max(y, 0); }})}}),
+              Object.assign({{}}, pEl.data[1], {{x: xs, y: ys.map(function(y) {{ return Math.min(y, 0); }})}}),
+              Object.assign({{}}, pEl.data[2], {{x: xs, y: ys}}),
+            ], pEl.layout);
+          }} catch(e) {{ }}
+        }}
+
+        function calcUpdate(raw) {{
+          const debit = Math.min(Math.max(parseFloat(raw) || origDebit, 0.05), spread - 0.01);
+          slider.value   = debit.toFixed(2);
+          numInput.value = debit.toFixed(2);
+          const maxP = Math.round((spread - debit) * 100);
+          const maxL = Math.round(debit * 100);
+          const roc  = (maxP / maxL * 100).toFixed(1);
+          const be   = kind === 'bull_call'
+            ? (buyStrike + debit).toFixed(2)
+            : (buyStrike - debit).toFixed(2);
+
+          metrics.innerHTML =
+            m('Net Debit',  '-$' + debit.toFixed(2), 'neg') +
+            m('Max Profit', '+$' + maxP,              'pos') +
+            m('Max Loss',   '-$' + maxL,              'neg') +
+            m('Break-even', '$'  + be,                '')    +
+            m('ROC',        roc + '%', parseFloat(roc) >= 20 ? 'pos' : 'dim');
+
+          const knBody = wrap && wrap.querySelector('.calc-kn-wrap .hc-section-body');
+          if (knBody) knBody.innerHTML = buildKN(debit);
+
+          const ptBody = wrap && wrap.querySelector('.calc-pt-wrap .hc-section-body');
+          if (ptBody) ptBody.innerHTML = buildPT(debit);
+
+          updatePlotly(debit);
+
+          const netInput = wrap && wrap.querySelector('input.calc-order-net-price');
+          if (netInput) netInput.value = (-debit).toFixed(2);
+          const netDisplay = wrap && wrap.querySelector('.calc-order-net-display');
+          if (netDisplay) netDisplay.textContent = '-$' + maxL + ' debit ' + (netDisplay.dataset.suffix || '');
+        }}
+
+        slider.addEventListener('input',  e => calcUpdate(e.target.value));
+        numInput.addEventListener('input', e => calcUpdate(e.target.value));
+        calcUpdate(origDebit);
       }});
     }}
 
