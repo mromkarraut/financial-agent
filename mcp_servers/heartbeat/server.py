@@ -246,6 +246,47 @@ async def _probe_standard(slug: str) -> ProbeResult:
         return ProbeResult("error", latency, 0, None, f"DB error: {exc}{proc_tag}")
 
 
+async def _probe_tester() -> ProbeResult:
+    """Tester probe: reads test_runs (no call_log table in tester DB)."""
+    db_path = _AGENT_DBS["tester"]
+    t0 = time.monotonic()
+    module   = _AGENT_MODULES.get("tester", "")
+    proc_tag = ""
+    if module:
+        running  = await asyncio.to_thread(_process_running, module)
+        proc_tag = " | process: live" if running else " | process: not running"
+
+    if not os.path.exists(db_path):
+        return ProbeResult("idle", 0, 0, None, f"DB not yet initialized{proc_tag}")
+
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM test_runs") as cur:
+                count = (await cur.fetchone() or (0,))[0]
+            async with db.execute(
+                "SELECT timestamp FROM test_runs ORDER BY id DESC LIMIT 1"
+            ) as cur:
+                row = await cur.fetchone()
+                last_call = row[0] if row else None
+
+        latency = int((time.monotonic() - t0) * 1000)
+        recency = ""
+        if last_call:
+            try:
+                delta = datetime.now(timezone.utc) - datetime.fromisoformat(last_call)
+                mins = int(delta.total_seconds() / 60)
+                recency = f", last run {mins}m ago" if mins < 60 else f", last run {mins//60}h ago"
+            except Exception:
+                pass
+        return ProbeResult(
+            "healthy", latency, count, last_call,
+            f"DB OK ({count} test runs){recency}{proc_tag}",
+        )
+    except Exception as exc:
+        latency = int((time.monotonic() - t0) * 1000)
+        return ProbeResult("error", latency, 0, None, f"DB error: {exc}{proc_tag}")
+
+
 async def _probe_ibkr_session() -> ProbeResult:
     """ibkr_session probe: standard DB check + IB Gateway TWS socket ping."""
     result = await _probe_standard("ibkr_session")
@@ -271,7 +312,11 @@ async def _probe_ibkr_session() -> ProbeResult:
 async def _probe_all() -> dict[str, ProbeResult]:
     """Probe all agents concurrently."""
     probes = {
-        slug: (_probe_ibkr_session() if slug == "ibkr_session" else _probe_standard(slug))
+        slug: (
+            _probe_ibkr_session() if slug == "ibkr_session"
+            else _probe_tester()  if slug == "tester"
+            else _probe_standard(slug)
+        )
         for slug in _AGENT_DBS
     }
     raw = await asyncio.gather(*probes.values(), return_exceptions=True)
