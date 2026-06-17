@@ -885,6 +885,7 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
 }
 .calc-label { font-size: 12px; font-weight: 600; color: var(--dim); white-space: nowrap; }
 .calc-slider { flex: 1; min-width: 120px; accent-color: var(--green); cursor: pointer; height: 4px; }
+.calc-qty-slider { accent-color: var(--blue); }
 .calc-input {
   width: 80px; background: var(--bg2);
   border: 1.5px solid var(--border); border-radius: 7px;
@@ -911,14 +912,14 @@ body.light .atm-row  { background: rgba(0,80,208,0.07); }
 
 /* ── Positions page ── */
 .pos-page        { padding: 24px; max-width: 1100px; margin: 0 auto; }
-.pos-live-wrap   { margin-bottom: 28px; }
-.pos-strat-wrap  { }
-.pos-section-hdr {
-  font-size: 11px; font-weight: 700; color: var(--dim);
-  text-transform: uppercase; letter-spacing: 0.08em;
-  margin-bottom: 12px; display: flex; align-items: center; gap: 10px;
-}
 .pos-refresh { font-weight: 400; font-size: 10px; color: var(--dim); opacity: 0.6; }
+
+/* Live positions hc-table overrides */
+.pos-live-table td:first-child { text-align: left; color: var(--text); font-weight: 600; font-size: 13px; }
+.pos-live-table th:first-child { text-align: left; }
+.pos-live-total td { border-top: 2px solid var(--border) !important; font-weight: 700; }
+.pos-live-contract { font-family: var(--mono); font-size: 12px; }
+
 .btn-pos-refresh {
   background: none; border: 1px solid var(--border); border-radius: 5px;
   color: var(--dim); font-size: 10px; font-weight: 600; padding: 2px 7px;
@@ -1290,7 +1291,7 @@ async def _build_fundamentals_html(ticker: str) -> str:
 
 async def _build_positions_html() -> str:
     import asyncio as _aio
-    from datetime import date, datetime
+    from datetime import date
 
     from db.database import order_history
 
@@ -1298,13 +1299,12 @@ async def _build_positions_html() -> str:
     today  = date.today()
 
     # ── Sync pending order statuses from IBKR ───────────────────────────────
-    live_open_ids: set[str]      = set()
     live_statuses: dict[str, str] = {}
     ibkr_synced = False
     try:
         from mcp_servers.ibkr_orders.server import get_live_order_statuses
         from db.database import update_order_status
-        live_open_ids, live_statuses = await _aio.wait_for(get_live_order_statuses(), timeout=15)
+        _, live_statuses = await _aio.wait_for(get_live_order_statuses(), timeout=15)
         ibkr_synced = True
         for o in orders:
             oid = str(o.get("ibkr_order_id") or "")
@@ -1316,37 +1316,122 @@ async def _build_positions_html() -> str:
     except Exception:
         pass
 
-    # ── Live positions from ib_insync (best-effort) ──────────────────────────
+    # ── Refresh button (shared) ──────────────────────────────────────────────
     _refresh_btn = (
-        f'<button class="btn-pos-refresh"'
-        f' hx-get="/api/positions-fragment"'
-        f' hx-target="#positions-content"'
-        f' hx-swap="innerHTML"'
-        f' hx-indicator=".pos-refresh-spin">'
-        f'↻ Refresh</button>'
-        f'<span class="pos-refresh-spin htmx-indicator">fetching…</span>'
+        '<button class="btn-pos-refresh"'
+        ' hx-get="/api/positions-fragment"'
+        ' hx-target="#positions-content"'
+        ' hx-swap="innerHTML"'
+        ' hx-indicator=".pos-refresh-spin">'
+        '↻ Refresh</button>'
+        '<span class="pos-refresh-spin htmx-indicator">fetching…</span>'
     )
+
+    # ── Live P&L + positions via structured data ─────────────────────────────
     try:
-        from mcp_servers.ibkr_positions.server import get_live_pnl, get_open_positions
-        pnl_text = await _aio.wait_for(get_live_pnl(),       timeout=20)
-        pos_text = await _aio.wait_for(get_open_positions(), timeout=20)
-        live_body = f'<pre class="pos-pre">{pnl_text}</pre><pre class="pos-pre">{pos_text}</pre>'
+        from mcp_servers.ibkr_positions.server import get_pnl_dict, get_positions_dict
+        pnl, pos_data = await _aio.gather(
+            _aio.wait_for(get_pnl_dict(),       timeout=20),
+            _aio.wait_for(get_positions_dict(), timeout=20),
+            return_exceptions=True,
+        )
+        if isinstance(pnl,      Exception): pnl      = {"error": str(pnl)}
+        if isinstance(pos_data, Exception): pos_data = {"error": str(pos_data), "positions": []}
     except Exception as exc:
-        err = str(exc) or type(exc).__name__
-        live_body = f'<p class="pos-err">IB Gateway offline: {err}</p>'
+        pnl = pos_data = {"error": str(exc), "positions": []}
+
+    # P&L metric grid
+    if "error" in pnl:
+        pnl_html = f'<div class="hc-alert hc-alert-error" style="margin:16px">IB Gateway offline: {pnl["error"]}</div>'
+    else:
+        def _pv(v: float) -> str:
+            return f'{"+" if v >= 0 else ""}${abs(v):,.2f}'
+        def _pc(v: float) -> str:
+            return "pos" if v >= 0 else "neg"
+        pnl_html = (
+            f'<div class="hc-metric-grid" style="padding:16px 20px 18px">'
+            f'<div class="hc-metric"><div class="hc-metric-label">Day P&L</div>'
+            f'<div class="hc-metric-value {_pc(pnl["day_pnl"])}">{_pv(pnl["day_pnl"])}</div></div>'
+            f'<div class="hc-metric"><div class="hc-metric-label">Unrealized</div>'
+            f'<div class="hc-metric-value {_pc(pnl["unrealized"])}">{_pv(pnl["unrealized"])}</div></div>'
+            f'<div class="hc-metric"><div class="hc-metric-label">Realized</div>'
+            f'<div class="hc-metric-value {_pc(pnl["realized"])}">{_pv(pnl["realized"])}</div></div>'
+            f'<div class="hc-metric"><div class="hc-metric-label">Net Liq</div>'
+            f'<div class="hc-metric-value">${pnl.get("net_liq", 0):,.2f}</div></div>'
+            f'</div>'
+        )
+
+    # Open positions table
+    positions = pos_data.get("positions") or []
+    if "error" in pos_data and not positions:
+        pos_table_html = f'<div class="hc-alert hc-alert-error" style="margin:0 16px 16px">Could not load positions: {pos_data["error"]}</div>'
+    elif not positions:
+        pos_table_html = '<div class="hc-alert hc-alert-info" style="margin:0 16px 16px">No open positions.</div>'
+    else:
+        pos_rows = ""
+        for p in positions:
+            upnl_cls  = "pos-profit" if p["upnl"] >= 0 else "pos-loss"
+            upnl_sign = "+" if p["upnl"] >= 0 else ""
+            qty_sign  = "+" if p["qty"] >= 0 else ""
+            pos_rows += (
+                f'<tr>'
+                f'<td class="pos-live-contract">{p["desc"]}</td>'
+                f'<td class="pos-mono">{qty_sign}{p["qty"]:.0f}</td>'
+                f'<td class="pos-mono">${p["avg_cost"]:,.2f}</td>'
+                f'<td class="pos-mono">${abs(p["mkt_value"]):,.2f}</td>'
+                f'<td class="pos-mono {upnl_cls}">{upnl_sign}${abs(p["upnl"]):,.2f}</td>'
+                f'</tr>'
+            )
+        total_upnl     = pos_data.get("total_upnl", 0)
+        total_val      = pos_data.get("total_val", 0)
+        total_upnl_cls = "pos-profit" if total_upnl >= 0 else "pos-loss"
+        total_sign     = "+" if total_upnl >= 0 else ""
+        pos_rows += (
+            f'<tr class="pos-live-total">'
+            f'<td class="pos-live-contract">Total</td>'
+            f'<td></td><td></td>'
+            f'<td class="pos-mono">${total_val:,.2f}</td>'
+            f'<td class="pos-mono {total_upnl_cls}">{total_sign}${abs(total_upnl):,.2f}</td>'
+            f'</tr>'
+        )
+        pos_table_html = (
+            f'<div class="hc-table-wrap">'
+            f'<table class="hc-table pos-live-table">'
+            f'<thead><tr>'
+            f'<th>Contract</th><th>Qty</th><th>Avg Cost</th><th>Mkt Value</th><th>Unreal P&L</th>'
+            f'</tr></thead>'
+            f'<tbody>{pos_rows}</tbody>'
+            f'</table></div>'
+        )
+
+    account    = pnl.get("account") or pos_data.get("account") or ""
+    is_paper   = pnl.get("paper")   or pos_data.get("paper")
+    paper_tag  = '<span class="hc-badge hc-badge-dim" style="font-size:10px;text-transform:none;letter-spacing:0">📄 PAPER</span>' if is_paper else ''
+    pos_ms     = pos_data.get("ms", 0)
+    pos_count  = len(positions)
+
     live_html = (
-        f'<div class="pos-live-wrap">'
-        f'<div class="pos-section-hdr">Live Account'
-        f'  <span class="pos-refresh">auto-refresh 60s</span>'
-        f'  {_refresh_btn}'
+        f'<div class="hc-section" style="margin-bottom:20px">'
+        f'<div class="hc-section-header">'
+        f'Live Account{(" — " + account) if account else ""} {paper_tag}'
+        f'<span class="pos-refresh">auto-refresh 60s</span>'
+        f'{_refresh_btn}'
         f'</div>'
-        f'{live_body}'
+        f'{pnl_html}'
+        f'<div style="border-top:1px solid var(--border)">'
+        f'<div class="hc-section-header" style="border-bottom:1px solid var(--border)">'
+        f'Open Positions'
+        f'<span class="hc-badge hc-badge-{"blue" if pos_count else "dim"}">{pos_count}</span>'
+        f'<span class="pos-refresh">{pos_ms}ms</span>'
+        f'</div>'
+        f'{pos_table_html}'
+        f'</div>'
         f'</div>'
     )
 
-    # ── Strategy table from order history ────────────────────────────────────
+    # ── Strategy history table ────────────────────────────────────────────────
     if not orders:
-        strat_html = '<p class="pos-empty">No orders in history yet.</p>'
+        strat_body = '<div class="hc-alert hc-alert-info" style="margin:16px">No orders in history yet.</div>'
     else:
         rows = []
         for o in orders:
@@ -1372,15 +1457,14 @@ async def _build_positions_html() -> str:
 
             is_credit = net > 0
             if is_credit:
-                max_p = round(abs(net) * 100 * qty)
-                max_l = round((spread - abs(net)) * 100 * qty)
+                max_p     = round(abs(net) * 100 * qty)
+                max_l     = round((spread - abs(net)) * 100 * qty)
                 breakeven = round(short_s - abs(net), 2) if right == "P" else round(short_s + abs(net), 2)
             else:
-                max_l = round(abs(net) * 100 * qty)
-                max_p = round((spread - abs(net)) * 100 * qty)
+                max_l     = round(abs(net) * 100 * qty)
+                max_p     = round((spread - abs(net)) * 100 * qty)
                 breakeven = round(max(short_s, long_s) - abs(net), 2) if right == "P" else round(min(short_s, long_s) + abs(net), 2)
 
-            # DTE badge
             if dte is None:
                 dte_cell = '<span class="dte-badge dte-dim">—</span>'
             elif dte == 0:
@@ -1402,38 +1486,31 @@ async def _build_positions_html() -> str:
             else:
                 status_cell = f'<span class="pos-status">{status}</span>'
 
-            ts = (o.get("timestamp") or "")[:10]
+            ts       = (o.get("timestamp") or "")[:10]
             strategy = o.get("strategy") or "—"
             ticker   = o.get("ticker") or "—"
             right_w  = "Put" if right == "P" else "Call"
 
-            is_cancelled = "cancel" in status
-            is_filled    = "fill" in status
-            # Show cancel unless IBKR explicitly reports the order as closed.
-            # If IBKR doesn't know the order (cross-session), still allow the
-            # attempt — IBKR will return "not found" if it's already done.
+            is_cancelled     = "cancel" in status
+            is_filled        = "fill" in status
             ibkr_live_status = live_statuses.get(ibkr_oid, "").lower() if ibkr_synced else ""
-            ibkr_closed = bool(ibkr_live_status and any(
+            ibkr_closed      = bool(ibkr_live_status and any(
                 t in ibkr_live_status for t in ("fill", "cancel", "inactive")
             ))
-            can_cancel   = (
+            can_cancel = (
                 not is_cancelled and not is_filled
                 and ibkr_oid and ibkr_oid not in ("", "None", "0")
                 and not ibkr_closed
             )
 
-            if can_cancel:
-                action_cell = (
-                    f'<form hx-post="/api/cancel-order" hx-target="this" hx-swap="outerHTML">'
-                    f'<input type="hidden" name="order_id" value="{ibkr_oid}">'
-                    f'<button type="submit" class="btn-cancel">'
-                    f'<span class="cancel-idle">✕ Cancel</span>'
-                    f'<span class="cancel-busy">Cancelling…</span>'
-                    f'</button>'
-                    f'</form>'
-                )
-            else:
-                action_cell = ""
+            action_cell = (
+                f'<form hx-post="/api/cancel-order" hx-target="this" hx-swap="outerHTML">'
+                f'<input type="hidden" name="order_id" value="{ibkr_oid}">'
+                f'<button type="submit" class="btn-cancel">'
+                f'<span class="cancel-idle">✕</span>'
+                f'<span class="cancel-busy">…</span>'
+                f'</button></form>'
+            ) if can_cancel else ""
 
             rows.append(
                 f'<tr id="order-row-{ibkr_oid}"{" data-cancelled" if is_cancelled else ""}>'
@@ -1452,26 +1529,16 @@ async def _build_positions_html() -> str:
                 f'</tr>'
             )
 
+        filled_count = sum(1 for o in orders if "fill" in (o.get("status") or "").lower())
         cancel_all_btn = (
-            f'<form hx-post="/api/cancel-all-orders" hx-target="#cancel-all-result" hx-swap="innerHTML"'
-            f' style="display:inline">'
+            f'<form hx-post="/api/cancel-all-orders" hx-target="#cancel-all-result" hx-swap="innerHTML" style="display:inline">'
             f'<button type="submit" class="btn-cancel-all">'
             f'<span class="cancel-idle">✕ Cancel All</span>'
             f'<span class="cancel-busy">Cancelling…</span>'
-            f'</button>'
-            f'</form>'
+            f'</button></form>'
             f'<span id="cancel-all-result"></span>'
         )
-        strat_html = (
-            f'<div class="pos-section-hdr">Strategy History'
-            f'<div class="pos-hdr-actions">'
-            f'{cancel_all_btn}'
-            f'<label class="pos-toggle">'
-            f'<input type="checkbox" id="show-cancelled" onchange="toggleCancelled(this.checked)">'
-            f'Show cancelled'
-            f'</label>'
-            f'</div>'
-            f'</div>'
+        strat_body = (
             f'<div class="pos-table-wrap">'
             f'<table class="pos-table" id="pos-table">'
             f'<thead><tr>'
@@ -1482,22 +1549,44 @@ async def _build_positions_html() -> str:
             f'<th>Breakeven</th>'
             f'<th>Qty</th><th>Net</th><th>Status</th><th>Date</th><th></th>'
             f'</tr></thead>'
-            f'<tbody>' + "\n".join(rows) + '</tbody>'
+            f'<tbody>' + "\n".join(rows) + f'</tbody>'
             f'</table>'
             f'</div>'
-            f'<script>'
-            f'(function(){{'
+            f'<script>(function(){{'
             f'  function toggleCancelled(show){{'
             f'    document.querySelectorAll("#pos-table tr[data-cancelled]")'
-            f'      .forEach(function(r){{ r.style.display = show ? "" : "none"; }});'
+            f'      .forEach(function(r){{r.style.display=show?"":"none";}});'
             f'  }}'
-            f'  window.toggleCancelled = toggleCancelled;'
-            f'  toggleCancelled(false);'  # hide by default
-            f'}})();'
-            f'</script>'
+            f'  window.toggleCancelled=toggleCancelled;'
+            f'  toggleCancelled(false);'
+            f'}})();</script>'
         )
 
-    return f'<div class="pos-page">{live_html}<div class="pos-strat-wrap">{strat_html}</div></div>'
+    filled_count = sum(1 for o in orders if "fill" in (o.get("status") or "").lower()) if orders else 0
+    cancel_all_btn_outer = (
+        f'<form hx-post="/api/cancel-all-orders" hx-target="#cancel-all-result" hx-swap="innerHTML" style="display:inline">'
+        f'<button type="submit" class="btn-cancel-all"><span class="cancel-idle">✕ Cancel All</span>'
+        f'<span class="cancel-busy">Cancelling…</span></button></form>'
+        f'<span id="cancel-all-result"></span>'
+    ) if orders else ""
+
+    strat_html = (
+        f'<div class="hc-section">'
+        f'<div class="hc-section-header">Strategy History'
+        f'<span class="hc-badge hc-badge-{"green" if filled_count else "dim"}">{filled_count} filled</span>'
+        f'<div class="pos-hdr-actions">'
+        f'{cancel_all_btn_outer}'
+        f'<label class="pos-toggle">'
+        f'<input type="checkbox" id="show-cancelled" onchange="toggleCancelled(this.checked)">'
+        f'Show cancelled'
+        f'</label>'
+        f'</div>'
+        f'</div>'
+        f'{strat_body}'
+        f'</div>'
+    )
+
+    return f'<div class="pos-page">{live_html}{strat_html}</div>'
 
 
 def _page(history: list[dict], active_tab: str = "search",
@@ -1644,8 +1733,10 @@ def _page(history: list[dict], active_tab: str = "search",
         const theta      = parseFloat(el.dataset.theta || 0);
         const curPrice   = parseFloat(el.dataset.price || buyStrike);
         const wrap       = el.closest('.result-wrap');
-        const slider     = el.querySelector('.calc-slider');
-        const numInput   = el.querySelector('.calc-input');
+        const slider     = el.querySelector('.calc-slider:not(.calc-qty-slider)');
+        const numInput   = el.querySelector('.calc-input:not(.calc-qty-input)');
+        const qtySlider  = el.querySelector('.calc-qty-slider');
+        const qtyInput   = el.querySelector('.calc-qty-input');
         const metrics    = el.querySelector('.calc-metrics');
 
         function m(label, val, cls) {{
@@ -1657,37 +1748,42 @@ def _page(history: list[dict], active_tab: str = "search",
           return '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + lbl + '</td><td>' + val + '</td></tr>';
         }}
 
-        function buildKN(debit) {{
-          const maxP = Math.round((spread - debit) * 100);
-          const maxL = Math.round(debit * 100);
-          const roc  = (maxP / maxL * 100).toFixed(1);
-          const be   = (kind === 'bull_call' ? buyStrike + debit : buyStrike - debit).toFixed(2);
-          const opt  = kind === 'bull_call' ? 'Call' : 'Put';
-          const lp   = '<span class="hc-leg-price">';
-          const lpe  = '</span>';
-          const popC = pop >= 0.5 ? 'pos' : 'neg';
+        function buildKN(debit, qty) {{
+          const maxP1 = Math.round((spread - debit) * 100);
+          const maxL1 = Math.round(debit * 100);
+          const maxP  = maxP1 * qty;
+          const maxL  = maxL1 * qty;
+          const roc   = (maxP1 / maxL1 * 100).toFixed(1);
+          const be    = (kind === 'bull_call' ? buyStrike + debit : buyStrike - debit).toFixed(2);
+          const opt   = kind === 'bull_call' ? 'Call' : 'Put';
+          const lp    = '<span class="hc-leg-price">';
+          const lpe   = '</span>';
+          const popC  = pop >= 0.5 ? 'pos' : 'neg';
           let t = '<div class="hc-table-wrap"><table class="hc-table">'
                 + '<thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';
           t += row('Buy '  + opt, '$' + buyStrike.toFixed(0)  + ' ' + lp + '@ $' + buyPrice.toFixed(2)  + '/sh' + lpe, '');
           t += row('Sell ' + opt, '$' + sellStrike.toFixed(0) + ' ' + lp + '@ $' + sellPrice.toFixed(2) + '/sh' + lpe, '');
-          t += row('Net debit',  pnlSpan('-$' + debit.toFixed(2), 'neg') + ' ' + lp + '($' + maxL + '/contract)' + lpe, 'hc-row-loss');
-          t += row('Break-even', '$' + be, 'hc-row-be');
-          t += row('POP',        pnlSpan((pop*100).toFixed(0) + '%', popC), '');
-          t += row('P50',        (p50v*100).toFixed(0) + '%', '');
-          t += row('Max profit', pnlSpan('+$' + maxP, 'pos'), 'hc-row-profit');
-          t += row('Max loss',   pnlSpan('-$' + maxL, 'neg'), 'hc-row-loss');
-          t += row('ROC',        roc + '%', '');
-          t += row('Theta',      (theta >= 0 ? '+' : '') + '$' + Math.abs(theta).toFixed(2) + '/day', '');
-          t += row('Delta',      (delta >= 0 ? '+' : '') + delta.toFixed(3), '');
-          t += row('Spread',     '$' + spread.toFixed(0), '');
+          t += row('Contracts',   qty + (qty === 1 ? ' contract' : ' contracts'), '');
+          t += row('Net debit',   pnlSpan('-$' + debit.toFixed(2), 'neg') + ' ' + lp + '($' + maxL1 + '/contract · $' + maxL + ' total)' + lpe, 'hc-row-loss');
+          t += row('Break-even',  '$' + be, 'hc-row-be');
+          t += row('POP',         pnlSpan((pop*100).toFixed(0) + '%', popC), '');
+          t += row('P50',         (p50v*100).toFixed(0) + '%', '');
+          t += row('Max profit',  pnlSpan('+$' + maxP, 'pos') + ' ' + lp + '($' + maxP1 + '/contract)' + lpe, 'hc-row-profit');
+          t += row('Max loss',    pnlSpan('-$' + maxL, 'neg') + ' ' + lp + '($' + maxL1 + '/contract)' + lpe, 'hc-row-loss');
+          t += row('ROC',         roc + '%', '');
+          t += row('Theta',       (theta >= 0 ? '+' : '') + '$' + Math.abs(theta * qty).toFixed(2) + '/day' + ' ' + lp + '($' + Math.abs(theta).toFixed(2) + '/contract)' + lpe, '');
+          t += row('Delta',       (delta >= 0 ? '+' : '') + (delta * qty).toFixed(3) + ' ' + lp + '(' + (delta >= 0 ? '+' : '') + delta.toFixed(3) + '/contract)' + lpe, '');
+          t += row('Spread',      '$' + spread.toFixed(0), '');
           return t + '</tbody></table></div>';
         }}
 
-        function buildPT(debit) {{
+        function buildPT(debit, qty) {{
           const lo   = Math.min(buyStrike, sellStrike);
           const hi   = Math.max(buyStrike, sellStrike);
-          const maxP = Math.round((spread - debit) * 100);
-          const maxL = Math.round(debit * 100);
+          const maxP1 = Math.round((spread - debit) * 100);
+          const maxL1 = Math.round(debit * 100);
+          const maxP  = maxP1 * qty;
+          const maxL  = maxL1 * qty;
           const be   = kind === 'bull_call' ? buyStrike + debit : buyStrike - debit;
           const pad  = spread * 0.5;
           const step = (hi + pad - (lo - pad)) / 11;
@@ -1698,26 +1794,28 @@ def _page(history: list[dict], active_tab: str = "search",
             if (mn > step * 0.25) levels.push(Math.round(x * 100) / 100);
           }});
           levels = levels.filter(function(v, i, a) {{ return a.indexOf(v) === i; }}).sort(function(a, b) {{ return a - b; }});
-          function pnl(px) {{
+          function pnl1(px) {{
             const v = kind === 'bull_call'
               ? (Math.max(0, px - buyStrike) - Math.max(0, px - sellStrike) - debit) * 100
               : (Math.max(0, buyStrike - px) - Math.max(0, sellStrike - px) - debit) * 100;
             return Math.round(v);
           }}
+          const qtyLabel = qty > 1 ? ' (' + qty + ' contracts)' : '';
           let t = '<div class="hc-table-wrap"><table class="hc-table"><thead><tr>'
-                + '<th>Price</th><th>P&amp;L / contract</th><th>% of Max</th><th></th>'
+                + '<th>Price</th><th>P&amp;L' + qtyLabel + '</th><th>% of Max</th><th></th>'
                 + '</tr></thead><tbody>';
           for (let i = 0; i < levels.length; i++) {{
-            const px = levels[i];
-            const p  = pnl(px);
+            const px  = levels[i];
+            const p1  = pnl1(px);
+            const p   = p1 * qty;
             const isCurr = Math.abs(px - curPrice) < step * 0.15;
             const isBe   = Math.abs(px - be)       < step * 0.15;
             let label, pctStr, cls;
-            if      (p >= maxP)        {{ label = 'max profit ✅'; pctStr = '100%'; cls = 'hc-row-max hc-row-profit'; }}
-            else if (p <= -maxL)       {{ label = 'max loss ❌';   pctStr = '—'; cls = 'hc-row-loss'; }}
-            else if (Math.abs(p) <= 2) {{ label = 'break-even';        pctStr = '0%';   cls = 'hc-row-be'; }}
-            else if (p > 0)            {{ label = 'profit';            pctStr = Math.round(p/maxP*100) + '%'; cls = 'hc-row-profit'; }}
-            else                       {{ label = 'loss';              pctStr = '—'; cls = 'hc-row-loss'; }}
+            if      (p1 >= maxP1)       {{ label = 'max profit ✅'; pctStr = '100%'; cls = 'hc-row-max hc-row-profit'; }}
+            else if (p1 <= -maxL1)      {{ label = 'max loss ❌';   pctStr = '—';    cls = 'hc-row-loss'; }}
+            else if (Math.abs(p1) <= 2) {{ label = 'break-even';   pctStr = '0%';   cls = 'hc-row-be'; }}
+            else if (p1 > 0)            {{ label = 'profit';       pctStr = Math.round(p1/maxP1*100) + '%'; cls = 'hc-row-profit'; }}
+            else                        {{ label = 'loss';         pctStr = '—';    cls = 'hc-row-loss'; }}
             if (isCurr) {{ cls += ' hc-row-current'; label = '◄ now  ' + label; }}
             else if (isBe) cls += ' hc-row-be';
             const sign = p >= 0 ? '+' : '';
@@ -1727,7 +1825,7 @@ def _page(history: list[dict], active_tab: str = "search",
           return t + '</tbody></table></div>';
         }}
 
-        function updatePlotly(debit) {{
+        function updatePlotly(debit, qty) {{
           const pEl = wrap && wrap.querySelector('.plotly-pnl-chart[data-init]');
           if (!pEl || !window.Plotly || !pEl.data || pEl.data.length < 3) return;
           const lo = Math.min(buyStrike, sellStrike, curPrice) * 0.88;
@@ -1735,9 +1833,10 @@ def _page(history: list[dict], active_tab: str = "search",
           const xs = [];
           for (let i = 0; i < 300; i++) xs.push(lo + (hi - lo) * i / 299);
           const ys = xs.map(function(p) {{
-            return kind === 'bull_call'
+            const v = kind === 'bull_call'
               ? (Math.max(0, p - buyStrike) - Math.max(0, p - sellStrike) - debit) * 100
               : (Math.max(0, buyStrike - p) - Math.max(0, sellStrike - p) - debit) * 100;
+            return v * qty;
           }});
           try {{
             Plotly.react(pEl, [
@@ -1748,41 +1847,51 @@ def _page(history: list[dict], active_tab: str = "search",
           }} catch(e) {{ }}
         }}
 
-        function calcUpdate(raw) {{
-          const debit = Math.min(Math.max(parseFloat(raw) || origDebit, 0.05), spread - 0.01);
-          slider.value   = debit.toFixed(2);
-          numInput.value = debit.toFixed(2);
-          const maxP = Math.round((spread - debit) * 100);
-          const maxL = Math.round(debit * 100);
-          const roc  = (maxP / maxL * 100).toFixed(1);
-          const be   = kind === 'bull_call'
+        function calcUpdate(rawDebit, rawQty) {{
+          const debit = Math.min(Math.max(parseFloat(rawDebit) || origDebit, 0.05), spread - 0.01);
+          const qty   = Math.max(1, Math.min(100, parseInt(rawQty) || 1));
+          slider.value    = debit.toFixed(2);
+          numInput.value  = debit.toFixed(2);
+          if (qtySlider) qtySlider.value = qty;
+          if (qtyInput)  qtyInput.value  = qty;
+          const maxP1 = Math.round((spread - debit) * 100);
+          const maxL1 = Math.round(debit * 100);
+          const maxP  = maxP1 * qty;
+          const maxL  = maxL1 * qty;
+          const roc   = (maxP1 / maxL1 * 100).toFixed(1);
+          const be    = kind === 'bull_call'
             ? (buyStrike + debit).toFixed(2)
             : (buyStrike - debit).toFixed(2);
 
           metrics.innerHTML =
-            m('Net Debit',  '-$' + debit.toFixed(2), 'neg') +
-            m('Max Profit', '+$' + maxP,              'pos') +
-            m('Max Loss',   '-$' + maxL,              'neg') +
-            m('Break-even', '$'  + be,                '')    +
-            m('ROC',        roc + '%', parseFloat(roc) >= 20 ? 'pos' : 'dim');
+            m('Net Debit',   '-$' + debit.toFixed(2) + '/sh', 'neg') +
+            m('Contracts',   qty + (qty === 1 ? ' contract' : ' contracts'), 'blue') +
+            m('Max Profit',  '+$' + maxP, 'pos') +
+            m('Max Loss',    '-$' + maxL, 'neg') +
+            m('Break-even',  '$'  + be,   '')    +
+            m('ROC',         roc + '%', parseFloat(roc) >= 20 ? 'pos' : 'dim');
 
           const knBody = wrap && wrap.querySelector('.calc-kn-wrap .hc-section-body');
-          if (knBody) knBody.innerHTML = buildKN(debit);
+          if (knBody) knBody.innerHTML = buildKN(debit, qty);
 
           const ptBody = wrap && wrap.querySelector('.calc-pt-wrap .hc-section-body');
-          if (ptBody) ptBody.innerHTML = buildPT(debit);
+          if (ptBody) ptBody.innerHTML = buildPT(debit, qty);
 
-          updatePlotly(debit);
+          updatePlotly(debit, qty);
 
           const netInput = wrap && wrap.querySelector('input.calc-order-net-price');
           if (netInput) netInput.value = (-debit).toFixed(2);
+          const qtyOrderInput = wrap && wrap.querySelector('input[name="quantity"]');
+          if (qtyOrderInput) qtyOrderInput.value = qty;
           const netDisplay = wrap && wrap.querySelector('.calc-order-net-display');
           if (netDisplay) netDisplay.textContent = '-$' + maxL + ' debit ' + (netDisplay.dataset.suffix || '');
         }}
 
-        slider.addEventListener('input',  e => calcUpdate(e.target.value));
-        numInput.addEventListener('input', e => calcUpdate(e.target.value));
-        calcUpdate(origDebit);
+        slider.addEventListener('input',    e => calcUpdate(e.target.value, qtyInput ? qtyInput.value : 1));
+        numInput.addEventListener('input',  e => calcUpdate(e.target.value, qtyInput ? qtyInput.value : 1));
+        if (qtySlider) qtySlider.addEventListener('input', e => {{ if(qtyInput) qtyInput.value = e.target.value; calcUpdate(slider.value, e.target.value); }});
+        if (qtyInput)  qtyInput.addEventListener('input',  e => {{ if(qtySlider) qtySlider.value = e.target.value; calcUpdate(slider.value, e.target.value); }});
+        calcUpdate(origDebit, 1);
       }});
     }}
 

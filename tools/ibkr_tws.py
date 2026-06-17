@@ -101,8 +101,11 @@ def make_vertical_spread(
 ) -> Contract:
     """
     Build a BAG (combo) contract for a vertical spread.
-    Credit spread: sell short_conid, buy long_conid.
-    Debit spread:  buy short_conid, sell long_conid.
+
+    The overall order is always BUY (caller's responsibility).
+    Leg actions are always SELL short / BUY long — IBKR executes them as-is
+    when the order action is BUY. The credit/debit distinction is handled by
+    the limit price sign (negative = credit received, positive = debit paid).
     """
     combo = Contract()
     combo.symbol   = symbol
@@ -113,13 +116,13 @@ def make_vertical_spread(
     short_leg         = ComboLeg()
     short_leg.conId   = short_conid
     short_leg.ratio   = 1
-    short_leg.action  = "SELL" if is_credit else "BUY"
+    short_leg.action  = "SELL"   # always sell the short leg
     short_leg.exchange = exchange
 
     long_leg          = ComboLeg()
     long_leg.conId    = long_conid
     long_leg.ratio    = 1
-    long_leg.action   = "BUY" if is_credit else "SELL"
+    long_leg.action   = "BUY"   # always buy the long leg
     long_leg.exchange = exchange
 
     combo.comboLegs = [short_leg, long_leg]

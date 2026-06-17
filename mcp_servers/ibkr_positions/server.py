@@ -263,5 +263,95 @@ async def get_allocation(account_id: str = "") -> str:
         return f"Error: {exc}"
 
 
+async def get_pnl_dict() -> dict:
+    """Return P&L data as a structured dict for web rendering (not an MCP tool)."""
+    t0 = time.monotonic()
+    try:
+        ib      = await connect_ib(CLIENT_ID)
+        account = await get_account_id(ib)
+        if not account:
+            return {"error": "No accounts found"}
+        tags = {"DayPnL", "UnrealizedPnL", "RealizedPnL", "NetLiquidation"}
+        vals = {v.tag: v.value for v in ib.accountValues(account)
+                if v.tag in tags and v.currency in ("USD", "")}
+        def _f(k: str) -> float:
+            try:
+                return float(vals.get(k) or 0)
+            except Exception:
+                return 0.0
+        return {
+            "account":    account,
+            "paper":      is_paper_account(account),
+            "day_pnl":    _f("DayPnL"),
+            "unrealized": _f("UnrealizedPnL"),
+            "realized":   _f("RealizedPnL"),
+            "net_liq":    _f("NetLiquidation"),
+            "ms":         int((time.monotonic() - t0) * 1000),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+async def get_positions_dict() -> dict:
+    """Return open positions as a structured dict for web rendering (not an MCP tool)."""
+    t0 = time.monotonic()
+    try:
+        ib         = await connect_ib(CLIENT_ID)
+        account_id = await get_account_id(ib)
+        positions  = await asyncio.wait_for(ib.reqPositionsAsync(), timeout=10)
+        if account_id:
+            positions = [p for p in positions if p.account == account_id]
+
+        rows: list[dict] = []
+        total_val  = 0.0
+        total_upnl = 0.0
+        for p in positions:
+            c    = p.contract
+            qty  = p.position
+            avg  = p.avgCost
+            val  = qty * avg
+            upnl = 0.0
+            try:
+                t = ib.ticker(c)
+                if t and t.marketPrice() and t.marketPrice() > 0:
+                    val  = qty * t.marketPrice()
+                    upnl = val - qty * avg
+            except Exception:
+                pass
+            total_val  += abs(val)
+            total_upnl += upnl
+
+            if c.secType == "OPT":
+                try:
+                    from datetime import datetime as _dt
+                    exp_fmt = _dt.strptime(c.lastTradeDateOrContractMonth, "%Y%m%d").strftime("%b %d")
+                except Exception:
+                    exp_fmt = c.lastTradeDateOrContractMonth
+                desc = f"{c.symbol} {c.right}{c.strike:.0f} {exp_fmt}"
+            else:
+                desc = f"{c.symbol} {c.secType}"
+
+            rows.append({
+                "desc":      desc,
+                "symbol":    c.symbol,
+                "sec_type":  c.secType,
+                "qty":       qty,
+                "avg_cost":  avg,
+                "mkt_value": val,
+                "upnl":      upnl,
+            })
+
+        return {
+            "account":    account_id,
+            "paper":      is_paper_account(account_id),
+            "positions":  rows,
+            "total_val":  total_val,
+            "total_upnl": total_upnl,
+            "ms":         int((time.monotonic() - t0) * 1000),
+        }
+    except Exception as exc:
+        return {"error": str(exc), "positions": []}
+
+
 if __name__ == "__main__":
     mcp.run()

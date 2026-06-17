@@ -44,21 +44,27 @@ _llm = get_llm_client()
 
 # ── Per-agent DB paths ─────────────────────────────────────────────────────────
 _AGENT_DBS: dict[str, str] = {
+    "data_pull":        os.path.join(_ROOT, "db", "agents", "data_pull.db"),
     "stock_research":   os.path.join(_ROOT, "db", "agents", "stock_research.db"),
     "fundamentals":     os.path.join(_ROOT, "db", "agents", "fundamentals.db"),
     "options_research": os.path.join(_ROOT, "db", "agents", "options_research.db"),
     "watchlist":        os.path.join(_ROOT, "db", "agents", "watchlist.db"),
     "summarizer":       os.path.join(_ROOT, "db", "agents", "summarizer.db"),
     "ibkr":             os.path.join(_ROOT, "db", "agents", "ibkr.db"),
+    "charting":         os.path.join(_ROOT, "db", "agents", "charting.db"),
+    "html_css":         os.path.join(_ROOT, "db", "agents", "html_css.db"),
 }
 
 _AGENT_NAMES: dict[str, str] = {
+    "data_pull":        "Data Pull",
     "stock_research":   "Stock Research",
     "fundamentals":     "Fundamentals",
     "options_research": "Options Research",
     "watchlist":        "Watchlist",
     "summarizer":       "Summarizer",
     "ibkr":             "IBKR",
+    "charting":         "Charting",
+    "html_css":         "HTML/CSS",
 }
 
 # ── Health result ──────────────────────────────────────────────────────────────
@@ -257,7 +263,7 @@ mcp = FastMCP(
 @mcp.tool()
 async def check_all_agents() -> str:
     """
-    Probe all 6 MCP agents concurrently and return a live status table.
+    Probe all MCP agents concurrently and return a live status table.
     Checks DB accessibility, call count, and recency for each agent.
     IBKR also checks CP Gateway auth. Results are persisted to heartbeat.db.
     """
@@ -289,8 +295,8 @@ async def check_all_agents() -> str:
 async def check_agent(slug: str) -> str:
     """
     Probe one specific agent by its slug.
-    Valid slugs: stock_research, fundamentals, options_research,
-                 watchlist, summarizer, ibkr
+    Valid slugs: data_pull, stock_research, fundamentals, options_research,
+                 watchlist, summarizer, ibkr, charting, html_css
     """
     await _ensure_db()
     slug = slug.strip().lower()

@@ -26,7 +26,7 @@ from mcp_servers.llm import get_llm_client
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.market_data import get_fundamentals  # noqa: E402
+from mcp_servers.data_pull import get_fundamentals  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

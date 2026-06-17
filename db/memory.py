@@ -84,6 +84,16 @@ class MemoryManager:
         if count > MAX_TURNS_BEFORE_COMPRESS:
             await self._compress(chat_id)
 
+    async def clear_context(self, chat_id: str | int) -> None:
+        """Delete all turns and summary for a chat. Called before saving a new ticker research so
+        the memory never accumulates stale cross-ticker context."""
+        chat_id = str(chat_id)
+        async with aiosqlite.connect(config.DB_PATH) as db:
+            await db.execute("DELETE FROM conversation_turns    WHERE chat_id = ?", (chat_id,))
+            await db.execute("DELETE FROM conversation_summaries WHERE chat_id = ?", (chat_id,))
+            await db.commit()
+        logger.info("Cleared conversation context for chat %s", chat_id)
+
     async def compress_all_chats(self) -> None:
         """Sweep all chats and compress any that exceed the threshold."""
         async with aiosqlite.connect(config.DB_PATH) as db:

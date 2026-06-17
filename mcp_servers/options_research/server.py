@@ -30,7 +30,7 @@ from mcp_servers.llm import get_llm_client
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import config  # noqa: E402
-from tools.market_data import get_options_chain  # noqa: E402
+from mcp_servers.data_pull import get_options_chain  # noqa: E402
 from tools.options_math import (  # noqa: E402
     bs_delta, bs_theta_daily, expected_move,
     ivr_rank, p50, pop_credit_spread, pop_debit_spread,

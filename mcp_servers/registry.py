@@ -54,6 +54,77 @@ class AgentEntry(TypedDict):
 
 
 REGISTRY: dict[str, AgentEntry] = {
+    "data_pull": {
+        "slug": "data_pull",
+        "name": "Data Pull Agent",
+        "description": (
+            "Centralized market data ingress: stock snapshots (yfinance + Polygon), "
+            "fundamentals (IB Gateway Reuters → Yahoo Finance), and options chains "
+            "(IB Gateway real-time only). In-memory TTL cache prevents duplicate "
+            "API calls across agents. Every fetch logged to data_pull.db. "
+            "No LLM — pure data fetching."
+        ),
+        "version": "1.0.0",
+        "capabilities": [
+            "stock_snapshot",
+            "fundamentals_data",
+            "options_chain_data",
+            "ibkr_data_priority",
+            "yfinance_fallback",
+            "ttl_cache",
+            "fetch_logging",
+            "source_status_check",
+        ],
+        "llm": {"provider": "none", "model": "none"},
+        "memory": {"type": "sqlite", "path": "db/agents/data_pull.db"},
+        "shared_data": [],
+        "transport": "stdio",
+        "command": ["python", "-m", "mcp_servers.data_pull.server"],
+        "tools": [
+            {
+                "name": "fetch_stock",
+                "description": "Stock price snapshot: price, RSI-14, MA-20/50, volume.",
+                "parameters": {
+                    "ticker": {"type": "string", "description": "Stock ticker symbol (e.g. AAPL)"},
+                },
+            },
+            {
+                "name": "fetch_fundamentals",
+                "description": "Company financials: P/E, EPS, revenue growth, margins, D/E. IBKR→yfinance.",
+                "parameters": {
+                    "ticker": {"type": "string", "description": "Stock ticker symbol"},
+                },
+            },
+            {
+                "name": "fetch_options_chain",
+                "description": "Raw options chain JSON (calls+puts, IVs, Greeks). IBKR only.",
+                "parameters": {
+                    "ticker": {"type": "string", "description": "Stock ticker symbol"},
+                },
+            },
+            {
+                "name": "check_data_sources",
+                "description": "Check IBKR/yfinance reachability + cache stats.",
+                "parameters": {},
+            },
+            {
+                "name": "get_fetch_history",
+                "description": "Recent fetch log from data_pull.db — source, latency, cache hits.",
+                "parameters": {
+                    "ticker": {"type": "string", "description": "Filter by ticker (empty = all)"},
+                    "limit":  {"type": "integer", "description": "Number of entries (default 20)"},
+                },
+            },
+            {
+                "name": "clear_ticker_cache",
+                "description": "Evict ticker from in-memory TTL cache (empty = clear all).",
+                "parameters": {
+                    "ticker": {"type": "string", "description": "Ticker to clear (empty = all)"},
+                },
+            },
+        ],
+    },
+
     "stock_research": {
         "slug": "stock_research",
         "name": "Stock Research Agent",
@@ -586,6 +657,178 @@ REGISTRY: dict[str, AgentEntry] = {
             {"name": "get_live_orders",    "description": "Orders currently live on exchange.", "parameters": {}},
             {"name": "get_order_history",  "description": "Recent orders from local DB.",
              "parameters": {"limit": {"type": "integer"}}},
+        ],
+    },
+
+    "html_css": {
+        "slug": "html_css",
+        "name": "HTML/CSS Agent",
+        "description": (
+            "Styled HTML component renderer for the financial agent web UI. "
+            "Generates hc-* CSS class components: metric grids, data tables, "
+            "option strategy cards (legs, key numbers, profit table), alert strips, "
+            "and generic section cards. No LLM — pure deterministic rendering. "
+            "Used by other agents to produce web-ready HTML from raw financial data."
+        ),
+        "version": "1.0.0",
+        "capabilities": [
+            "html_rendering",
+            "metric_grid",
+            "data_table",
+            "strategy_card",
+            "legs_display",
+            "profit_table",
+            "alert_component",
+            "section_card",
+        ],
+        "llm": {"provider": "none", "model": "none"},
+        "memory": {"type": "sqlite", "path": "db/agents/html_css.db"},
+        "shared_data": [],
+        "transport": "stdio",
+        "command": ["python", "-m", "mcp_servers.html_css.server"],
+        "tools": [
+            {
+                "name": "render_metric_grid",
+                "description": "Metric badge grid from JSON metrics array.",
+                "parameters": {
+                    "metrics_json": {"type": "string", "description": 'JSON: [{"label","value","color"(opt)}]'},
+                    "title":        {"type": "string", "description": "Optional section card title"},
+                },
+            },
+            {
+                "name": "render_data_table",
+                "description": "Styled table with optional per-row colour classes.",
+                "parameters": {
+                    "headers_json":    {"type": "string", "description": 'JSON: ["Col1","Col2"]'},
+                    "rows_json":       {"type": "string", "description": 'JSON: [["v1","v2"],...]'},
+                    "title":           {"type": "string", "description": "Optional section card title"},
+                    "icon":            {"type": "string", "description": "Optional emoji prefix"},
+                    "row_classes_json":{"type": "string", "description": 'JSON: ["hc-row-profit",...]'},
+                },
+            },
+            {
+                "name": "render_strategy_card",
+                "description": "Full options strategy card: legs + metrics + profit table.",
+                "parameters": {
+                    "strategy_json": {"type": "string", "description": "JSON strategy dict from OptionsResearchAgent"},
+                    "current_price": {"type": "number", "description": "Current underlying price"},
+                },
+            },
+            {
+                "name": "render_legs_card",
+                "description": "BUY/SELL leg pills card for a vertical spread.",
+                "parameters": {
+                    "strategy_json": {"type": "string", "description": "JSON strategy dict"},
+                },
+            },
+            {
+                "name": "render_alert",
+                "description": "Styled alert strip — info, warning, success, or error.",
+                "parameters": {
+                    "message": {"type": "string", "description": "Alert message (HTML allowed)"},
+                    "level":   {"type": "string", "description": "info | warning | success | error"},
+                },
+            },
+            {
+                "name": "render_section_card",
+                "description": "Wrap arbitrary HTML in a titled section card.",
+                "parameters": {
+                    "title":     {"type": "string", "description": "Card header text"},
+                    "body_html": {"type": "string", "description": "Inner HTML"},
+                    "icon":      {"type": "string", "description": "Optional emoji prefix"},
+                },
+            },
+            {
+                "name": "recall_renders",
+                "description": "List previously rendered components from agent memory.",
+                "parameters": {
+                    "context": {"type": "string",  "description": "Filter by context/title substring"},
+                    "limit":   {"type": "integer", "description": "Number of entries (default 5)"},
+                },
+            },
+        ],
+    },
+
+    "charting": {
+        "slug": "charting",
+        "name": "Charting Agent",
+        "description": (
+            "Interactive Plotly charts for financial data: candlestick/line price history "
+            "with volume, fundamentals dashboards (revenue + margins), options spread payoff "
+            "diagrams, multi-ticker comparison (price return, P/E, margins), and ad-hoc "
+            "custom charts. Returns embed-ready Plotly HTML divs."
+        ),
+        "version": "1.0.0",
+        "capabilities": [
+            "price_charts",
+            "candlestick",
+            "volume_chart",
+            "fundamentals_chart",
+            "options_payoff_chart",
+            "multi_ticker_comparison",
+            "custom_chart",
+            "chart_history",
+        ],
+        "llm": {"provider": "none", "model": "none"},
+        "memory": {"type": "sqlite", "path": "db/agents/charting.db"},
+        "shared_data": [],
+        "transport": "stdio",
+        "command": ["python", "-m", "mcp_servers.charting.server"],
+        "tools": [
+            {
+                "name": "plot_price_history",
+                "description": "Candlestick or line price chart with volume subplot for a ticker.",
+                "parameters": {
+                    "ticker":     {"type": "string", "description": "Stock symbol (e.g. AAPL)"},
+                    "period":     {"type": "string", "description": "yfinance period: 1d 5d 1mo 3mo 6mo 1y 2y 5y (default: 3mo)"},
+                    "chart_type": {"type": "string", "description": "'candlestick' or 'line' (default: candlestick)"},
+                },
+            },
+            {
+                "name": "plot_fundamentals",
+                "description": "Fundamentals dashboard: quarterly revenue bars + gross/net margin lines.",
+                "parameters": {
+                    "ticker": {"type": "string", "description": "Stock symbol (e.g. AAPL)"},
+                },
+            },
+            {
+                "name": "plot_options_payoff",
+                "description": "Spread P&L payoff diagram at expiration. Max profit/loss annotated.",
+                "parameters": {
+                    "ticker":       {"type": "string",  "description": "Underlying symbol"},
+                    "short_strike": {"type": "number",  "description": "Strike being sold"},
+                    "long_strike":  {"type": "number",  "description": "Strike being bought (hedge)"},
+                    "right":        {"type": "string",  "description": "'C' for calls, 'P' for puts"},
+                    "expiry":       {"type": "string",  "description": "Expiration date YYYY-MM-DD"},
+                    "net_price":    {"type": "number",  "description": "Premium received (>0) or paid (<0)"},
+                    "spread_type":  {"type": "string",  "description": "'credit' or 'debit' (default: credit)"},
+                },
+            },
+            {
+                "name": "plot_comparison",
+                "description": "Multi-ticker comparison: price_return, pe_ratio, revenue_growth, or profit_margin.",
+                "parameters": {
+                    "tickers_csv": {"type": "string", "description": "Comma-separated symbols e.g. 'AAPL,MSFT,GOOGL'"},
+                    "metric":      {"type": "string", "description": "price_return | pe_ratio | revenue_growth | profit_margin"},
+                },
+            },
+            {
+                "name": "plot_custom",
+                "description": "Ad-hoc Plotly chart from arbitrary JSON data — line, bar, scatter, area, or pie.",
+                "parameters": {
+                    "title":      {"type": "string", "description": "Chart title"},
+                    "chart_type": {"type": "string", "description": "'line' | 'bar' | 'scatter' | 'area' | 'pie'"},
+                    "data_json":  {"type": "string", "description": 'JSON array e.g. [{"name":"S1","x":[...],"y":[...]}]'},
+                },
+            },
+            {
+                "name": "recall_charts",
+                "description": "List previously generated charts from agent memory.",
+                "parameters": {
+                    "ticker": {"type": "string",  "description": "Filter by symbol (empty = all)"},
+                    "limit":  {"type": "integer", "description": "Number of results (default 5, max 20)"},
+                },
+            },
         ],
     },
 

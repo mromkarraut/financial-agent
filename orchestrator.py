@@ -124,7 +124,13 @@ class Orchestrator:
                     )
 
             history = await self.memory.get_context(chat_id)
-            reply = await self._route_with_llm(working_text, history, chat_id=chat_id)
+            reply, agents_ran = await self._route_with_llm(working_text, history, chat_id=chat_id)
+
+            # Agents dispatched = new stock/options research. Wipe stale cross-ticker
+            # context so the next message never inherits the previous ticker's history.
+            if agents_ran:
+                await self.memory.clear_context(chat_id)
+
             await self.memory.save_turn(chat_id, text, reply)
             return reply
 
@@ -155,29 +161,38 @@ class Orchestrator:
 
     # ── Regex-based routing ───────────────────────────────────────────────────
 
-    async def _route_with_llm(self, text: str, history: list[dict], chat_id: str | int = "") -> str:
+    async def _route_with_llm(
+        self, text: str, history: list[dict], chat_id: str | int = ""
+    ) -> tuple[str, bool]:
+        """Returns (reply, agents_ran). agents_ran=True when research agents were dispatched."""
         calls = self._build_calls(text, chat_id=chat_id)
         if not calls:
-            return await self._general_reply(text, history)
+            return await self._general_reply(text, history), False
 
         # Execute all agent calls in parallel
         tasks = [self._dispatch(call["tool"], call.get("args", {})) for call in calls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Log and collect outputs
+        # agents_ran is True only when a price-data agent confirms a real ticker
+        # (fundamentals always returns confidence>0 even for garbage inputs)
+        _PRICE_TOOLS = {"run_stock_research", "run_options_research"}
         parts: list[str] = []
+        any_succeeded = False
         for call, result in zip(calls, results):
             if isinstance(result, Exception):
                 logger.error("Agent call failed for %s: %s", call["tool"], result)
             else:
                 await self._log_result(call.get("args", {}), result)
+                if call["tool"] in _PRICE_TOOLS and result.get("confidence", 0) > 0:
+                    any_succeeded = True
                 if result.get("output"):
                     parts.append(result["output"])
 
         if not parts:
-            return "⚠ All agents failed to return results."
+            return "⚠ All agents failed to return results.", False
 
-        return "\n\n".join(parts)
+        return "\n\n".join(parts), any_succeeded
 
     async def _general_reply(self, text: str, history: list[dict]) -> str:
         user_msg = {"role": "user", "content": f"{_GENERAL_SYSTEM}\n\n{text}"}
