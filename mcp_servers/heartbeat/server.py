@@ -50,9 +50,13 @@ _AGENT_DBS: dict[str, str] = {
     "options_research": os.path.join(_ROOT, "db", "agents", "options_research.db"),
     "watchlist":        os.path.join(_ROOT, "db", "agents", "watchlist.db"),
     "summarizer":       os.path.join(_ROOT, "db", "agents", "summarizer.db"),
-    "ibkr":             os.path.join(_ROOT, "db", "agents", "ibkr.db"),
     "charting":         os.path.join(_ROOT, "db", "agents", "charting.db"),
     "html_css":         os.path.join(_ROOT, "db", "agents", "html_css.db"),
+    "tester":           os.path.join(_ROOT, "db", "agents", "tester.db"),
+    "ibkr_session":     os.path.join(_ROOT, "db", "agents", "ibkr_session.db"),
+    "ibkr_positions":   os.path.join(_ROOT, "db", "agents", "ibkr_positions.db"),
+    "ibkr_orders":      os.path.join(_ROOT, "db", "agents", "ibkr_orders.db"),
+    "ibkr_market_data": os.path.join(_ROOT, "db", "agents", "ibkr_market_data.db"),
 }
 
 _AGENT_NAMES: dict[str, str] = {
@@ -62,9 +66,30 @@ _AGENT_NAMES: dict[str, str] = {
     "options_research": "Options Research",
     "watchlist":        "Watchlist",
     "summarizer":       "Summarizer",
-    "ibkr":             "IBKR",
     "charting":         "Charting",
     "html_css":         "HTML/CSS",
+    "tester":           "Tester",
+    "ibkr_session":     "IBKR Session",
+    "ibkr_positions":   "IBKR Positions",
+    "ibkr_orders":      "IBKR Orders",
+    "ibkr_market_data": "IBKR Market Data",
+}
+
+# Module args as passed to `python -m` — used to detect running processes.
+_AGENT_MODULES: dict[str, str] = {
+    "data_pull":        "mcp_servers.data_pull.server",
+    "stock_research":   "mcp_servers.stock_research.server",
+    "fundamentals":     "mcp_servers.fundamentals.server",
+    "options_research": "mcp_servers.options_research.server",
+    "watchlist":        "mcp_servers.watchlist.server",
+    "summarizer":       "mcp_servers.summarizer.server",
+    "charting":         "mcp_servers.charting.server",
+    "html_css":         "mcp_servers.html_css.server",
+    "tester":           "mcp_servers.tester.server",
+    "ibkr_session":     "mcp_servers.ibkr_session.server",
+    "ibkr_positions":   "mcp_servers.ibkr_positions.server",
+    "ibkr_orders":      "mcp_servers.ibkr_orders.server",
+    "ibkr_market_data": "mcp_servers.ibkr_market_data.server",
 }
 
 # ── Health result ──────────────────────────────────────────────────────────────
@@ -152,15 +177,46 @@ async def _write_system_snapshot(results: dict[str, ProbeResult]) -> None:
         await db.commit()
 
 
+# ── Process liveness ──────────────────────────────────────────────────────────
+
+def _process_running(module_arg: str) -> bool:
+    """
+    Return True if a Python process launched with `python -m <module_arg>` is
+    currently running. Scans /proc/*/cmdline — no external deps required.
+    MCP servers are started on-demand by Claude Code, so not-running is normal
+    when idle; this is purely informational in the detail string.
+    """
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmdline = f.read().replace(b"\x00", b" ").decode(errors="ignore")
+                if module_arg in cmdline:
+                    return True
+            except (PermissionError, FileNotFoundError, ProcessLookupError):
+                continue
+    except Exception:
+        pass
+    return False
+
+
 # ── Probe implementations ──────────────────────────────────────────────────────
 
 async def _probe_standard(slug: str) -> ProbeResult:
-    """Probe any agent: check DB accessibility and call recency."""
+    """Probe any agent: DB accessibility, call recency, and process liveness."""
     db_path = _AGENT_DBS[slug]
     t0 = time.monotonic()
 
+    module   = _AGENT_MODULES.get(slug, "")
+    proc_tag = ""
+    if module:
+        running  = await asyncio.to_thread(_process_running, module)
+        proc_tag = " | process: live" if running else " | process: not running"
+
     if not os.path.exists(db_path):
-        return ProbeResult("idle", 0, 0, None, "DB not yet initialized (agent never started)")
+        return ProbeResult("idle", 0, 0, None, f"DB not yet initialized (agent never started){proc_tag}")
 
     try:
         async with aiosqlite.connect(db_path) as db:
@@ -183,24 +239,24 @@ async def _probe_standard(slug: str) -> ProbeResult:
                 pass
         return ProbeResult(
             "healthy", latency, count, last_call,
-            f"DB OK ({count} calls){recency}",
+            f"DB OK ({count} calls){recency}{proc_tag}",
         )
     except Exception as exc:
         latency = int((time.monotonic() - t0) * 1000)
-        return ProbeResult("error", latency, 0, None, f"DB error: {exc}")
+        return ProbeResult("error", latency, 0, None, f"DB error: {exc}{proc_tag}")
 
 
-async def _probe_ibkr() -> ProbeResult:
-    """IBKR probe: standard DB check + IB Gateway TWS socket ping."""
-    result = await _probe_standard("ibkr")
+async def _probe_ibkr_session() -> ProbeResult:
+    """ibkr_session probe: standard DB check + IB Gateway TWS socket ping."""
+    result = await _probe_standard("ibkr_session")
     gateway_note = ""
     try:
         import socket
         s = socket.create_connection(("127.0.0.1", 4002), timeout=2)
         s.close()
-        gateway_note = " | IB Gateway: port 4002 reachable"
+        gateway_note = " | IB Gateway port 4002: reachable"
     except OSError:
-        gateway_note = " | IB Gateway: port 4002 unreachable"
+        gateway_note = " | IB Gateway port 4002: unreachable"
     except Exception as exc:
         gateway_note = f" | IB Gateway: {exc}"
     return ProbeResult(
@@ -215,7 +271,7 @@ async def _probe_ibkr() -> ProbeResult:
 async def _probe_all() -> dict[str, ProbeResult]:
     """Probe all agents concurrently."""
     probes = {
-        slug: (_probe_ibkr() if slug == "ibkr" else _probe_standard(slug))
+        slug: (_probe_ibkr_session() if slug == "ibkr_session" else _probe_standard(slug))
         for slug in _AGENT_DBS
     }
     raw = await asyncio.gather(*probes.values(), return_exceptions=True)
@@ -296,7 +352,8 @@ async def check_agent(slug: str) -> str:
     """
     Probe one specific agent by its slug.
     Valid slugs: data_pull, stock_research, fundamentals, options_research,
-                 watchlist, summarizer, ibkr, charting, html_css
+                 watchlist, summarizer, charting, html_css, tester,
+                 ibkr_session, ibkr_positions, ibkr_orders, ibkr_market_data
     """
     await _ensure_db()
     slug = slug.strip().lower()

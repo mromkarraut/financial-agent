@@ -20,7 +20,7 @@ python start.py --web-only    # web dashboard only, no Telegram bot
 # DB migration (run after adding tables to database.py)
 python -c "import asyncio; from db.database import init_db; asyncio.run(init_db())"
 
-# Quick options research smoke-test (no server needed)
+# Smoke-test an agent directly (no server needed)
 python -c "
 import asyncio
 from agents.options_research_agent import OptionsResearchAgent
@@ -30,11 +30,21 @@ async def t():
 asyncio.run(t())
 "
 
+# Smoke-test the data_pull layer
+python -c "
+import asyncio
+from mcp_servers.data_pull.fetch import get_stock_data, get_source_status
+async def t():
+    print(await get_source_status())
+    print(await get_stock_data('SPY'))
+asyncio.run(t())
+"
+
 # List all MCP servers and their tools
 python -m mcp_servers.registry
 
-# Run an individual MCP server (Claude Code auto-starts via .claude/settings.json)
-python -m mcp_servers.ibkr_session.server
+# Run an individual MCP server manually
+python -m mcp_servers.data_pull.server
 ```
 
 ## Architecture
@@ -58,14 +68,19 @@ Telegram message
   → if len(text) > LONG_MESSAGE_THRESHOLD (300):
       → SummarizerAgent              [LLM]
   → memory.get_context(chat_id)
-  → _build_calls(text)               [regex routing]
-      options keywords?              → OptionsResearchAgent only
-      ticker(s) present?             → StockResearchAgent + FundamentalsAgent (parallel)
-      no match?                      → _general_reply() [LLM fallback]
-  → asyncio.gather(*agent_calls)
+  → _route_with_llm(text, history)   returns (reply, agents_ran: bool)
+      _build_calls(text):
+        options keywords?            → OptionsResearchAgent only
+        ticker(s) present?           → StockResearchAgent + FundamentalsAgent (parallel)
+        no match?                    → _general_reply() [LLM fallback]
+  → if agents_ran: memory.clear_context(chat_id)   ← clears stale cross-ticker context
   → memory.save_turn()
   → TelegramSender.reply()           [HTML parse mode]
 ```
+
+### Context clearing rule
+
+`_route_with_llm` returns `agents_ran=True` only when `run_stock_research` or `run_options_research` succeeds with `confidence > 0`. `FundamentalsAgent` is excluded from this gate because yfinance returns a partial dict (and `confidence=0.85`) even for non-existent tickers. This prevents general questions from incorrectly clearing context.
 
 ### Routing rules (orchestrator.py)
 
@@ -94,31 +109,52 @@ Local model (LM Studio) frequently outputs `?????` garbage. `StockResearchAgent`
 
 `ANTHROPIC_API_KEY` is in `.env`. Set `MCP_LLM_PROVIDER=anthropic` to switch all MCP servers to Claude.
 
+### Data pull layer (`mcp_servers/data_pull/`)
+
+**Centralized data ingress** — all agents that need market data must import from here, not from `tools/market_data` directly:
+
+```python
+from mcp_servers.data_pull import get_stock_data, get_fundamentals, get_options_chain
+```
+
+Priority chain:
+- **Stock data**: yfinance (+ Polygon overlay if `POLYGON_API_KEY` set)
+- **Fundamentals**: IB Gateway (Reuters Refinitiv) → Yahoo Finance
+- **Options chain**: IB Gateway (real-time) → Yahoo Finance (delayed)
+
+Features: in-memory TTL cache (stock 60s, fundamentals/options 5min), every fetch logged to `db/agents/data_pull.db` with source + latency + cache-hit flag.
+
+`fetch.py` exports the three public functions. `server.py` wraps them as MCP tools (`fetch_stock`, `fetch_fundamentals`, `fetch_options_chain`, `check_data_sources`, `get_fetch_history`, `clear_ticker_cache`).
+
 ### MCP server layer
 
-13 independent MCP servers in `mcp_servers/`. Claude Code auto-starts them via `.claude/settings.json`. Each server:
+15 independent MCP servers in `mcp_servers/`. Claude Code auto-starts them via `.claude/settings.json`. Each server:
 - Uses `FastMCP` with `instructions=` (not `description=`) for the server-level string
 - Has its own per-agent SQLite DB under `db/agents/<slug>.db`
 - Gets its LLM via `mcp_servers/llm.py → get_llm_client()` — never import `anthropic` directly
 - Calls `_llm.complete(system, user, max_tokens)` — provider-agnostic
+- Exposes a `call_log` table in its DB so heartbeat can track recency
 
-To add a new MCP server: create `mcp_servers/<slug>/server.py`, add to `mcp_servers/registry.py`, register in `.claude/settings.json`.
+To add a new MCP server: create `mcp_servers/<slug>/server.py`, add entry to `mcp_servers/registry.py`, add slug+DB path to `mcp_servers/heartbeat/server.py → _AGENT_DBS`, register in `.claude/settings.json`.
 
 **Server listing:**
 
-| Slug | Tools |
+| Slug | Purpose |
 |---|---|
-| `stock_research` | analyze_stock, get_price_snapshot, recall_analyses |
-| `fundamentals` | get_company_fundamentals, compare_companies, recall_fundamentals |
-| `options_research` | research_options, get_options_chain_data, calculate_iv_rank, recall_research |
-| `watchlist` | add_ticker, remove_ticker, list_watchlist, get_watchlist_digest |
-| `summarizer` | summarize_text, extract_financial_entities, classify_market_sentiment |
-| `heartbeat` | check_all_agents, check_agent, get_health_report, get_health_history |
-| `tester` | run_all_tests, test_agent, test_web_api, get_test_report |
-| `ibkr_session` | get_connection_status, list_accounts, get_account_summary, get_session_log |
-| `ibkr_positions` | get_open_positions, get_live_pnl, get_portfolio_summary, get_allocation |
-| `ibkr_orders` | place_spread, get_risk_briefing, cancel_open_order, get_live_orders, get_order_history |
-| `ibkr_market_data` | get_stock_conid, get_option_contract_conid, get_market_snapshot, get_option_chain, search_contract, clear_conid_cache |
+| `data_pull` | Centralized market data (IBKR → yfinance); TTL cache; no LLM |
+| `stock_research` | Price/RSI/MA analysis + LLM narrative |
+| `fundamentals` | P/E, EPS, margins, quarterly revenue + LLM perspective |
+| `options_research` | Chain data, Black-Scholes, vertical spread ranking |
+| `watchlist` | Persistent ticker list + live digest |
+| `summarizer` | Text NLP — summarize, extract entities, sentiment |
+| `heartbeat` | Probes all agent DBs; writes `heartbeat.db` |
+| `tester` | 3-tier test runner (agent / HTTP / browser) |
+| `ibkr_session` | TWS session lifecycle |
+| `ibkr_positions` | Live P&L and open positions |
+| `ibkr_orders` | Spread order placement + cancel |
+| `ibkr_market_data` | Contract lookup, live quotes, conid cache |
+| `html_css` | `hc-*` component renderer — no LLM |
+| `charting` | Plotly chart generator — no LLM |
 
 ### IBKR integration (ib_insync TWS socket)
 
@@ -148,43 +184,42 @@ All IBKR functionality goes through **IB Gateway** (TWS socket, port 4002 paper 
 
 **Active agent** for all options keywords. No LLM — pure data + math:
 
-1. `get_options_chain(ticker)` → tries IB Gateway first, falls back to yfinance
+1. `get_options_chain(ticker)` → IB Gateway first, yfinance fallback (via `mcp_servers.data_pull`)
 2. Filters chains by `term` param: `short` ≤ 45 DTE, `long` > 21 DTE (furthest chains)
 3. `_generate_strategies()` → vertical spreads only, ranked by POP: best 3 credit + best 2 debit
-4. Output HTML saved to `options_research_memory` for web history replay
+4. Web output saved to `options_research_memory` for history replay
 
-**Output structure** (parts joined with `\n`):
-1. Header — price, outlook, IVR, term label (`📅 Short Term` / `📆 Long Term`)
-2. Expirations selector `<pre>`
-3. Chain table `<pre>`
-4. 5 Strategies Compared `<pre>`
-5. 🏆 Recommended header — POP, net, ROC (bullets with `<br>`)
-6. "Trade Structure" heading + `_fmt_detail_card()`:
-   - The Legs (`<br>` per leg), How it works (`<br>` per point)
-   - Key Numbers `<pre>` (block — use `<pre>` not `<code>` to ensure section separation)
-   - Payoff at Expiration `[expiry date]` `<pre>`
-7. P&L chart `<pre>`
-8. Place Order button (HTMX form → `/api/place-order`)
+**Debit calculator panel** (`_fmt_calc_panel`): interactive `hc-section` with two control rows:
+- **Debit slider** (green) — adjusts net debit per share; range `0.05` to `spread - 0.01`
+- **Qty slider** (blue) — adjusts number of contracts (1–20); syncs with the order form's `quantity` field
+
+The JS `calcUpdate(debit, qty)` in `server.py` updates: metric grid, Key Numbers table, Payoff table, Plotly chart — all multiplied by `qty`. Delta and theta also scale by contracts.
 
 `tools/options_math.py` — pure math: `bs_delta`, `bs_theta_daily`, `pop_credit_spread`, `pop_debit_spread`, `p50`, `ivr_rank`, `expected_move`.
 
-### Fundamentals data flow
-
-`tools/market_data.get_fundamentals(ticker)`:
-1. Tries IB Gateway → `reqFundamentalDataAsync("ReportSnapshot")` → `_parse_ibkr_fundamentals_xml()`
-2. Falls back to Yahoo Finance → `_fetch_fundamentals_sync()`
-3. Return dict always includes `source` and `source_url` — displayed in web fundamentals card footer
-
 ### Web UI (`server.py`)
 
-FastAPI + HTMX — routes return HTML fragments:
-- `POST /search` → `asyncio.gather(OptionsResearchAgent.run(), _fundamentals_card())` — fundamentals in parallel
-- `GET /positions` → positions page; `/api/positions-fragment` — 60s HTMX auto-refresh
-- `POST /api/place-order` → calls `ibkr_orders.place_spread()` via ib_insync
-- `GET /ibkr` → session status + order history
-- `_page(history, active_tab, body_override, show_search=True)` — base template; `show_search=False` hides ticker search bar
+FastAPI + HTMX — routes return HTML fragments. All styling uses the **`hc-*` design system** (defined in `_CSS`):
 
-**Positions tab columns:** Symbol, Strategy, Strikes, Expiry, DTE badge (🟢>21d / 🟡7–21d / 🔴<7d⚠), Max Profit, Max Loss, Breakeven, Qty, Net, Status. "Show cancelled" checkbox is client-side JS (`data-cancelled` attr on rows).
+| Class | Purpose |
+|---|---|
+| `hc-section` | Bordered card with header |
+| `hc-section-header` | Card header — flex row, uppercase dim text |
+| `hc-metric-grid` + `hc-metric` | Key metric badges |
+| `hc-table` + `hc-table-wrap` | Data tables — first col left-aligned, rest right |
+| `hc-badge-{green,red,yellow,blue,dim}` | Coloured pill badges |
+| `hc-alert-{info,warning,success,error}` | Alert strips |
+| `hc-row-{profit,loss,current,be,max}` | Table row colour classes |
+
+`tools/html_components.py` exposes Python helpers (`section_card`, `metric_grid`, `data_table`, `alert`, `legs_list`, etc.) that emit the same `hc-*` HTML. Use these in agents producing web output.
+
+**Key routes:**
+- `POST /search` → `asyncio.gather(OptionsResearchAgent.run(), _fundamentals_card())` — options + fundamentals in parallel
+- `GET /positions` / `GET /api/positions-fragment` — live IBKR P&L + positions as `hc-metric-grid` + `hc-table`; 60s HTMX auto-refresh
+- `POST /api/place-order` → `ibkr_orders.place_spread()` via ib_insync
+- `GET /ibkr` → session status + order history
+
+**Positions tab** pulls structured data via `get_pnl_dict()` / `get_positions_dict()` from `mcp_servers/ibkr_positions/server.py` (not the text-returning MCP tools). Strategy history table uses `pos-table` class with `data-cancelled` attr for the toggle.
 
 **Breakeven formula:**
 - Credit + Put: `short_strike - abs(net)` | Credit + Call: `short_strike + abs(net)`
@@ -198,7 +233,8 @@ New tables via `CREATE TABLE IF NOT EXISTS` in `db/database.py → init_db()`. S
 - `options_research_memory` — includes `output_html` for instant web replay
 - `ibkr_conid_cache` — option conids keyed by (symbol, expiry, right, strike)
 - `ibkr_orders` — order history; `db/database.py → order_history()` is the canonical read function
-- `conversation_turns`, `conversation_summaries` — per-chat memory with auto-compression at 16 turns
+- `conversation_turns`, `conversation_summaries` — per-chat memory; `db/memory.py → MemoryManager`
+  - `clear_context(chat_id)` — called automatically after successful stock/options research
 
 ### Environment variables (`.env`)
 
@@ -221,3 +257,31 @@ New tables via `CREATE TABLE IF NOT EXISTS` in `db/database.py → init_db()`. S
 ### WSL2 / networking
 
 Runs on WSL2 with `networkingMode=mirrored` — `localhost` in WSL equals `localhost` on Windows. cloudflared auto-started by `main.py`, sets `WEB_SERVER_URL` to the live public tunnel URL.
+
+## Known issues and future improvements
+
+### Data layer
+- **`data_pull` cache is in-process only** — each MCP server process and the uvicorn server maintain separate `_cache` dicts. A short-TTL Redis or SQLite-backed cache would deduplicate IBKR calls across processes.
+- **`FundamentalsAgent` confidence bug** — `yf.Ticker(x).info` returns a partial dict even for non-existent tickers, so `FundamentalsAgent` always returns `confidence=0.85`. The fix is to validate that `company_name != ticker` and `market_cap is not None` before reporting success.
+- **yfinance options chain missing Greeks** — when IBKR is unavailable, the yfinance fallback returns bid/ask/IV but no delta/gamma/theta/vega. Black-Scholes approximations from `tools/options_math.py` could fill these in from the IV.
+- **IBKR paper account limitations** — error 10358 (Reuters fundamentals not available on DU* accounts) and error 10089 (market data subscription missing for options) are expected on `DUM941592`. Positions show `$0.00` unrealized P&L because live quotes require a market data subscription.
+- **IBKR generic tick list error 321** — options contracts reject `genericTickList="106,107"` on paper accounts; only `106` (impvolat) is valid for OPT. `tools/ibkr_options.py` should be updated to request only `"106"`.
+
+### Orchestrator / routing
+- **Ticker regex false positives** — `_TICKER_RE` matches any 2–5 uppercase letter sequence. Common English words not in `_SKIP_WORDS` (e.g. "WHAT", "DOES", "RANK") get extracted as tickers and dispatch agents that fail. Extending `_SKIP_WORDS` or requiring a `$` prefix for unlabelled tickers would reduce noise.
+- **Conversation memory is Telegram-only** — the web dashboard (`server.py`) has no session memory; each `/search` is stateless. A session cookie + DB-backed context would let the web UI remember the previous ticker for follow-up questions.
+- **No web-side context clearing** — `memory.clear_context()` only fires in the Telegram path. If the same chat_id is shared between web and Telegram, web searches don't reset the Telegram memory.
+
+### Options research
+- **Debit spreads only** — `_generate_strategies()` only builds bull-call and bear-put verticals. Credit spreads (bull-put, bear-call), iron condors, and calendars are not generated.
+- **Qty slider max is 20** — hardcoded in `_fmt_calc_panel`. The order form itself accepts up to 100 but the slider stops at 20; a user typing in the number input can exceed this.
+- **No multi-leg Plotly chart** — the P&L chart in the calc panel shows a single-spread payoff. For iron condors or future multi-leg strategies, the chart would need to sum leg payoffs.
+
+### Web UI
+- **`hc-table td:first-child` override required for custom tables** — the design system sets `color: var(--dim)` on first-child cells; any table that needs a non-dim first column must add a CSS override (e.g. `.pos-live-table td:first-child`). Document this pattern when adding new tables.
+- **Plotly charts not theme-aware** — chart backgrounds and axis colours are hardcoded; they don't update when the user switches between dark/light/blue themes via the `localStorage` toggle.
+- **HTMX positions fragment polls every 60s regardless of visibility** — the auto-refresh trigger fires even when the positions tab is not active, causing unnecessary IBKR connections in the background.
+
+### MCP / heartbeat
+- **Heartbeat probes DB recency, not liveness** — ✅ fixed: `_process_running(module_arg)` in `heartbeat/server.py` scans `/proc/*/cmdline` for each server's module; result shown as `process: live | not running` in the detail string. Not-running is normal when the server hasn't been invoked yet.
+- **`ibkr` registry entry is stale** — ✅ fixed: removed the `ibkr` slug (old CP Gateway / REST). Registry now has 14 agents. Heartbeat now monitors all four TWS-based IBKR agents (`ibkr_session`, `ibkr_positions`, `ibkr_orders`, `ibkr_market_data`) plus `tester` — none of which were previously tracked.
