@@ -18,6 +18,7 @@ LLM:    claude-sonnet-4-6  (used only for market-context commentary)
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -41,15 +42,29 @@ logger = logging.getLogger(__name__)
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 AGENT_DB = os.path.join(_ROOT, "db", "agents", "options_research.db")
 SYSTEM = (
-    "You are a tastytrade-style options trader. Given options data, write 2-3 sentences "
-    "of market context: IV environment, expected move implication, and which strategy "
-    "type (credit vs debit) is favored. Be specific. No disclaimers."
+    "You are a professional options trader with deep expertise in volatility, Greeks, "
+    "and spread mechanics. Given detailed market data and computed strategies, write a "
+    "rigorous, specific analysis. Be direct — use exact numbers, no disclaimers, no filler."
 )
 
 _llm = get_llm_client()
 
 _db_ready = False
 NUMS = ["①", "②", "③", "④", "⑤"]
+
+
+def _output_usable(text: str) -> bool:
+    if not text or len(text) < 80:
+        return False
+    words = text.split()
+    repeats = sum(1 for a, b in zip(words, words[1:]) if a.lower() == b.lower())
+    if repeats > 3:
+        return False
+    if text.count("?") / len(text) > 0.03:
+        return False
+    if re.search(r'[^\x00-\x7F]{4,}|[.,:;!?]{4,}', text):
+        return False
+    return True
 
 
 def _utcnow() -> str:
@@ -292,25 +307,84 @@ async def research_options(ticker: str, outlook: str = "neutral") -> str:
     # LLM context
     context_txt = ""
     if atm_iv and chains:
-        fc = chains[0]
-        calls_l = [r for r in fc.get("calls", []) if r.get("strike")]
-        puts_l  = [r for r in fc.get("puts", [])  if r.get("strike")]
-        all_s   = sorted({r["strike"] for r in calls_l} | {r["strike"] for r in puts_l})
-        if all_s:
-            atm_r = _atm(all_s, price)
-            cm    = {r["strike"]: r for r in calls_l}
-            pm    = {r["strike"]: r for r in puts_l}
-            em    = expected_move(_mid(cm.get(atm_r, {})), _mid(pm.get(atm_r, {})))
-            prompt = (
-                f"{name} ({ticker}) at ${price}. IVR: {ivr:.0f} ({ivr_tag}), "
-                f"IVx: {iv_str}, HV30: {hv_30d*100:.1f}% if hv_30d else 'N/A'. "
-                f"Expected move (nearest exp): ±${em}. Outlook: {outlook}. "
-                f"Write 2-3 sentences of options market context."
+        # Build expiration expected-move summary
+        exp_lines = []
+        for chain in chains[:4]:
+            exp = chain["expiration"]
+            dte = _dte(exp)
+            calls_l = [r for r in chain.get("calls", []) if r.get("strike")]
+            puts_l  = [r for r in chain.get("puts",  []) if r.get("strike")]
+            all_s   = sorted({r["strike"] for r in calls_l} | {r["strike"] for r in puts_l})
+            em_str = ivx_str = ""
+            if all_s:
+                atm_r = _atm(all_s, price)
+                cm    = {r["strike"]: r for r in calls_l}
+                pm    = {r["strike"]: r for r in puts_l}
+                iv    = (cm.get(atm_r) or {}).get("impliedVolatility") or (pm.get(atm_r) or {}).get("impliedVolatility")
+                if iv:
+                    ivx_str = f"IVx {iv*100:.0f}%"
+                c_mid = _mid(cm.get(atm_r, {})); p_mid = _mid(pm.get(atm_r, {}))
+                if c_mid and p_mid:
+                    em_str = f"EM ±${expected_move(c_mid, p_mid):.2f}"
+            exp_lines.append(f"  {exp} ({dte}d): {ivx_str}  {em_str}".rstrip())
+
+        # Build strategy summary
+        strat_lines = []
+        for s in strategies:
+            strat_lines.append(
+                f"  {s['num']} {s['kind'].replace('_',' ').title()}"
+                f"  {s['exp']} ({s['dte']}d)"
+                f"  POP {s['pop']*100:.0f}%  P50 {s['p50']*100:.0f}%"
+                f"  {'credit' if s['is_credit'] else 'debit'} ${abs(int(s['net']*100))}"
+                f"  ROC {s['roc']:.0f}%  Δ{s['delta']:+.2f}  θ${s['theta']:+.2f}/d"
             )
-            try:
-                context_txt = await _llm.complete(SYSTEM, prompt, max_tokens=150)
-            except Exception as exc:
-                logger.warning("LLM context call failed: %s", exc)
+
+        best_desc = ""
+        if best:
+            best_desc = (
+                f"\nTop pick: {best['num']} {best['kind'].replace('_',' ').title()}\n"
+                f"  Strikes: ${best['sell_strike']:.0f}/${best['buy_strike']:.0f}"
+                f"  Expiry: {best['exp']} ({best['dte']}d)\n"
+                f"  Net: ${abs(int(best['net']*100))}/contract  POP: {best['pop']*100:.0f}%  ROC: {best['roc']:.0f}%\n"
+                f"  Breakeven: ${best['breakeven']}  Δ {best['delta']:+.2f}  θ ${best['theta']:+.2f}/day"
+            )
+
+        hv_line = f"HV30: {hv_30d*100:.1f}%" if hv_30d else "HV30: N/A"
+        ivr_env = "elevated — buying premium is expensive" if ivr >= 50 else "depressed — buying premium is cheap"
+
+        prompt = f"""Options analysis for {name} ({ticker}) at ${price:.2f}. Outlook: {outlook.upper()}.
+
+VOLATILITY
+ATM IV: {iv_str}  {hv_line}  IVR: {ivr:.0f}/100 ({ivr_env})
+{'IV/HV ratio: ' + f'{atm_iv/hv_30d:.2f}x' if hv_30d and atm_iv else ''}
+
+EXPIRATIONS
+{chr(10).join(exp_lines)}
+
+STRATEGIES RANKED BY POP
+{chr(10).join(strat_lines)}
+{best_desc}
+
+Write a thorough analysis with EXACTLY these four sections:
+
+**IV ENVIRONMENT**
+Assess current IV vs HV, what IVR {ivr:.0f} means for option buyers, and how the expected moves across expirations look. Which expiration has the most attractive IV term structure for a {outlook} trade?
+
+**TRADE THESIS**
+Why is the top-ranked strategy the best fit for a {outlook} outlook right now? Explain why these specific strikes and expiration were chosen. Compare briefly to the other candidates and why they rank lower.
+
+**KEY LEVELS TO WATCH**
+What price levels matter most (breakeven, max profit trigger)? What does the delta position mean for P&L sensitivity? What would need to happen for the trade to reach maximum profit?
+
+**RISK FACTORS**
+Top 2-3 specific risks: theta decay rate, IV crush potential, directional failure. When should the position be closed early? Be specific with numbers."""
+
+        try:
+            raw = await _llm.complete(SYSTEM, prompt, max_tokens=800)
+            if raw and _output_usable(raw):
+                context_txt = raw
+        except Exception as exc:
+            logger.warning("LLM context call failed: %s", exc)
 
     # Build report
     parts = [

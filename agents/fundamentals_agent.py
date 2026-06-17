@@ -1,24 +1,41 @@
 import logging
-
-from openai import AsyncOpenAI
+import re
 
 import config
 from agents.base_agent import AgentResult, BaseAgent
+from mcp_servers.llm import get_llm_client
 from tools.charts import generate_fundamentals_charts
 from tools.market_data import get_fundamentals
 
 logger = logging.getLogger(__name__)
 
+_llm = get_llm_client()
+
+_SYSTEM = (
+    "You are a senior fundamental equity analyst. Given detailed financial data, "
+    "write a rigorous multi-section analysis. Be specific about the numbers — "
+    "quote exact figures, compute ratios inline, explain what trends mean. "
+    "No disclaimers, no generic filler. Write like you're presenting to a fund manager."
+)
+
+
+def _llm_output_usable(text: str) -> bool:
+    if not text or len(text) < 80:
+        return False
+    words = text.split()
+    repeats = sum(1 for a, b in zip(words, words[1:]) if a.lower() == b.lower())
+    if repeats > 3:
+        return False
+    if text.count("?") / len(text) > 0.03:
+        return False
+    if re.search(r'[^\x00-\x7F]{4,}|[.,:;!?]{4,}', text):
+        return False
+    return True
+
 
 class FundamentalsAgent(BaseAgent):
     name = "fundamentals"
-    version = "2.0.0"
-
-    def __init__(self) -> None:
-        self._client = AsyncOpenAI(
-            base_url=config.LMSTUDIO_BASE_URL,
-            api_key="lm-studio",
-        )
+    version = "3.0.0"
 
     async def run(self, input: dict) -> AgentResult:
         ticker: str = input.get("ticker", "").strip().upper()
@@ -40,6 +57,7 @@ class FundamentalsAgent(BaseAgent):
 
             pe        = data.get("pe_ratio", "N/A")
             fwd_pe    = data.get("forward_pe", "N/A")
+            eps       = data.get("eps_ttm", "N/A")
             margin    = data.get("profit_margin_pct", "N/A")
             gmargin   = data.get("gross_margin_pct", "N/A")
             rev_yoy   = data.get("revenue_growth_yoy_pct", "N/A")
@@ -50,66 +68,81 @@ class FundamentalsAgent(BaseAgent):
             mcap_str  = f"${mcap/1e9:.1f}B" if mcap else "N/A"
             qtrs      = data.get("quarterly_revenues", [])
 
-            # Pre-compute valuation signal so the small model doesn't have to
+            # Build quarterly revenue detail for the prompt
+            qtr_lines = []
+            for q in qtrs[-6:]:
+                qoq = f" ({'+' if (q.get('qoq_pct') or 0) >= 0 else ''}{q.get('qoq_pct', 'N/A')}% QoQ)" if q.get("qoq_pct") is not None else ""
+                qtr_lines.append(f"  {q['period']}: ${q['revenue_b']}B{qoq}")
+
+            # Revenue acceleration/deceleration signal
+            rev_trend = "N/A"
+            if len(qtrs) >= 3:
+                recent_qoq = [q["qoq_pct"] for q in qtrs[-3:] if q.get("qoq_pct") is not None]
+                if recent_qoq:
+                    avg_qoq = sum(recent_qoq) / len(recent_qoq)
+                    rev_trend = "accelerating" if avg_qoq > 2 else ("decelerating" if avg_qoq < -2 else "stable")
+
+            # PEG-like signal
+            peg_note = "N/A"
+            if pe != "N/A" and rev_yoy != "N/A":
+                try:
+                    peg = float(pe) / float(rev_yoy) if float(rev_yoy) > 0 else None
+                    if peg is not None:
+                        peg_note = f"{peg:.1f}x (PE/revenue growth ratio — <1 suggests undervalued relative to growth)"
+                except (TypeError, ValueError):
+                    pass
+
+            prompt = f"""Fundamental analysis for {name} ({ticker}) in {sector}.
+Market Cap: {mcap_str}  |  EPS TTM: ${eps}
+
+VALUATION
+P/E (TTM): {pe}  |  Forward P/E: {fwd_pe}
+PE/Revenue Growth ratio: {peg_note}
+
+REVENUE
+YoY Growth: {rev_yoy}%  |  Trend: {rev_trend}
+Quarterly Revenue (last 6 quarters):
+{chr(10).join(qtr_lines) if qtr_lines else "  No quarterly data available"}
+
+PROFITABILITY
+Gross Margin: {gmargin}%  |  Profit Margin (net): {margin}%
+(Gross margin measures pricing power; net margin measures operational efficiency)
+
+BALANCE SHEET
+Debt/Equity: {de}
+
+Write a thorough analysis with EXACTLY these four sections. Use specific numbers throughout — do not round or generalize.
+
+**VALUATION ASSESSMENT**
+Is {name} cheap, fair, or expensive at {pe}x trailing and {fwd_pe}x forward P/E? Explain what the PE compression or expansion from trailing to forward implies about expected earnings growth. If PE/growth ratio is available, interpret it. Compare margins ({margin}% net, {gmargin}% gross) against typical software/tech/consumer/industrial benchmarks for {sector}.
+
+**REVENUE QUALITY**
+Analyse the revenue trajectory: is {rev_yoy}% YoY growth accelerating or decelerating quarter over quarter? Walk through the most recent 3 quarters and call out any inflection. Is {rev_trend} growth momentum a positive or negative signal given the current valuation?
+
+**PROFITABILITY AND EFFICIENCY**
+What does a {gmargin}% gross margin tell us about pricing power? How does the step-down from {gmargin}% gross to {margin}% net margin reflect cost structure? Is this a capital-light or capital-heavy business at a {de} debt/equity ratio?
+
+**CATALYSTS AND RISKS**
+Name 2 specific catalysts that could re-rate {name} higher given these metrics, and 2 specific risks. Be concrete — reference the actual numbers (e.g., what margin expansion is needed to justify the forward multiple, or what revenue deceleration would break the thesis)."""
+
             val_signal = "N/A"
-            if pe != "N/A" and fwd_pe != "N/A":
+            if pe != "N/A":
                 try:
                     val_signal = "stretched" if float(pe) > 30 else ("fair" if float(pe) > 15 else "cheap")
                 except (TypeError, ValueError):
                     pass
-
-            # Revenue trend direction
-            rev_trend = "N/A"
-            if len(qtrs) >= 3:
-                recent_qoq = [q["qoq_pct"] for q in qtrs[-3:] if q["qoq_pct"] is not None]
-                if recent_qoq:
-                    avg_qoq = sum(recent_qoq) / len(recent_qoq)
-                    rev_trend = "accelerating" if avg_qoq > 2 else ("declining" if avg_qoq < -2 else "stable")
-
-            # Margin signal
-            margin_signal = "N/A"
-            if margin != "N/A":
-                try:
-                    margin_signal = "strong" if float(margin) > 20 else ("moderate" if float(margin) > 8 else "weak")
-                except (TypeError, ValueError):
-                    pass
-
-            prompt = (
-                f"Fill in the blanks only. No extra text.\n\n"
-                f"Valuation: PE {pe} vs fwd PE {fwd_pe} — valuation is {val_signal} because ___.\n"
-                f"Revenue: {rev_yoy}% YoY, {rev_trend} quarterly trend, {margin_signal} margins ({margin}%) — ___.\n"
-                f"Risk: One key risk for {name} is ___."
+            analysis = (
+                f"Valuation: P/E {pe} vs forward P/E {fwd_pe} — appears {val_signal}.\n"
+                f"Revenue: {rev_yoy}% YoY growth, {rev_trend} trend, {margin}% net margin.\n"
+                f"Balance sheet: D/E {de}."
             )
 
-            try:
-                response = await self._client.chat.completions.create(
-                    model=config.LLM_MODEL,
-                    max_tokens=config.LLM_MAX_TOKENS,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                raw = (response.choices[0].message.content or "").strip()
-                q_ratio = raw.count("?") / max(len(raw), 1)
-                analysis = raw if raw and q_ratio < 0.3 else None
-            except Exception:
-                analysis = None
-
-            if not analysis:
-                val_note = (f"PE {pe} vs fwd PE {fwd_pe} — {val_signal} relative to sector peers"
-                            if val_signal != "N/A" else f"PE {pe}, forward PE {fwd_pe}")
-                rev_note = (f"{rev_yoy}% YoY, {rev_trend} quarterly trend, {margin_signal} margins ({margin}%)"
-                            if rev_yoy != "N/A" else f"margins at {margin}%")
-                analysis = (
-                    f"Valuation: {val_note}.\n"
-                    f"Revenue: {rev_note}.\n"
-                    f"Risk: Macro uncertainty and sector competition remain key watch items."
-                )
-
-            # Build quarterly revenue table
+            # Build quarterly revenue table for HTML output
             rev_table = ""
             if qtrs:
                 rows = []
                 for q in qtrs[-4:]:
-                    qoq_str = f" ({'+' if (q['qoq_pct'] or 0) >= 0 else ''}{q['qoq_pct']}%)" if q["qoq_pct"] is not None else ""
+                    qoq_str = f" ({'+' if (q['qoq_pct'] or 0) >= 0 else ''}{q['qoq_pct']}%)" if q.get("qoq_pct") is not None else ""
                     rows.append(f"  {q['period']}: <code>${q['revenue_b']}B{qoq_str}</code>")
                 rev_table = "<b>Quarterly Revenue</b>\n" + "\n".join(rows) + "\n\n"
 
@@ -122,7 +155,6 @@ class FundamentalsAgent(BaseAgent):
                 + rev_table
             )
 
-            # Generate interactive Plotly charts (web display only)
             charts = generate_fundamentals_charts(data)
 
             return AgentResult(

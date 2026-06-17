@@ -19,6 +19,7 @@ import aiosqlite
 
 import config
 from agents.base_agent import AgentResult, BaseAgent
+from mcp_servers.llm import get_llm_client
 from tools import html_components as hc
 from tools.market_data import get_options_chain
 from tools.options_math import (
@@ -33,6 +34,36 @@ Outlook = Literal["bullish", "bearish", "neutral"]
 NUMS = ["①", "②", "③", "④", "⑤"]
 
 MIN_SPREAD_WIDTH = 4.0  # hard minimum spread width in dollars — no spread narrower than this is ever suggested
+
+_llm = get_llm_client()
+
+_LLM_SYSTEM = (
+    "You are a professional options trader with deep expertise in volatility, "
+    "Greeks, and spread mechanics. Given detailed market data and computed strategies, "
+    "write a rigorous, specific analysis. Be direct and analytical — no disclaimers, "
+    "no generic filler. Use exact numbers from the data provided."
+)
+
+
+def _llm_output_usable(text: str) -> bool:
+    """Return False if the text looks like garbage from a small local model."""
+    if not text or len(text) < 80:
+        return False
+    words = text.split()
+    if not words:
+        return False
+    # Repeated consecutive words (e.g. "the the", "risk risk")
+    repeats = sum(1 for a, b in zip(words, words[1:]) if a.lower() == b.lower())
+    if repeats > 3:
+        return False
+    # Excessive question marks (model got confused)
+    if text.count("?") / len(text) > 0.03:
+        return False
+    # Garbled runs: 4+ consecutive non-ASCII or punctuation chars
+    import re
+    if re.search(r'[^\x00-\x7F]{4,}|[.,:;!?]{4,}', text):
+        return False
+    return True
 
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
@@ -1322,12 +1353,109 @@ def _web_debit_calculator(s: dict, price: float) -> str:
     )
 
 
+async def _get_llm_analysis(
+    ticker: str, name: str, price: float, outlook: str,
+    atm_iv: float, ivr: float, hv_30d: float | None,
+    chains: list[dict], strategies: list[dict], best: dict | None,
+) -> str:
+    """Call the LLM for deep options analysis. Returns empty string on failure."""
+    # Build expiration summary
+    exp_lines = []
+    for chain in chains[:4]:
+        exp = chain["expiration"]
+        dte = _dte(exp)
+        calls_l = [r for r in chain.get("calls", []) if r.get("strike")]
+        puts_l  = [r for r in chain.get("puts",  []) if r.get("strike")]
+        all_s   = _chain_strikes(calls_l, puts_l)
+        em_str  = ""
+        ivx_str = ""
+        if all_s:
+            atm_s = _atm(all_s, price)
+            cm    = {r["strike"]: r for r in calls_l}
+            pm    = {r["strike"]: r for r in puts_l}
+            iv    = (cm.get(atm_s) or {}).get("impliedVolatility") or (pm.get(atm_s) or {}).get("impliedVolatility")
+            if iv:
+                ivx_str = f"IVx {iv*100:.0f}%"
+            c_mid = _mid(cm.get(atm_s, {})); p_mid = _mid(pm.get(atm_s, {}))
+            if c_mid and p_mid:
+                em_str = f"EM ±${expected_move(c_mid, p_mid):.2f}"
+        exp_lines.append(f"  {_fmt_exp(exp)} ({dte}d): {ivx_str}  {em_str}".rstrip())
+
+    # Build strategy summary
+    strat_lines = []
+    for s in strategies:
+        kind_str = s["name"]
+        strikes  = f"${s.get('sell_strike') or s.get('buy_strike'):.0f}/${s.get('buy_strike'):.0f}"
+        strat_lines.append(
+            f"  {s['num']} {kind_str} — {_fmt_exp(s['exp'])} ({s['dte']}d)"
+            f"  strikes {strikes}"
+            f"  POP {s['pop']*100:.0f}%  P50 {s['p50']*100:.0f}%"
+            f"  debit ${s['max_loss']}  max profit ${s['max_profit']}  ROC {s['roc']:.0f}%"
+            f"  Δ {s['pos_delta']:+.3f}  θ ${s['pos_theta']:+.2f}/d"
+        )
+
+    best_desc = ""
+    if best:
+        be_str = f"${best['breakeven']}"
+        if "breakeven_lower" in best:
+            be_str = f"${best.get('breakeven_lower')} / ${best['breakeven']}"
+        best_desc = (
+            f"\nTop pick: {best['num']} {best['name']}\n"
+            f"  Strikes: ${best.get('sell_strike') or best.get('buy_strike'):.0f} / ${best.get('buy_strike'):.0f}"
+            f"  Expiry: {_fmt_exp(best['exp'])} ({best['dte']}d)\n"
+            f"  Debit: ${best['max_loss']}  Max profit: ${best['max_profit']}  ROC: {best['roc']:.0f}%\n"
+            f"  POP: {best['pop']*100:.0f}%  P50: {best['p50']*100:.0f}%\n"
+            f"  Breakeven: {be_str}  Delta: {best['pos_delta']:+.3f}  Theta: ${best['pos_theta']:+.2f}/day\n"
+            f"  Sigma: {best.get('sigma', 0)*100:.1f}%"
+        )
+
+    hv_line = f"HV30: {hv_30d*100:.1f}%" if hv_30d else "HV30: N/A"
+    iv_line  = f"ATM IV: {atm_iv*100:.1f}%" if atm_iv else "ATM IV: N/A"
+    ivr_env  = "elevated (IV rich — buying premium is expensive)" if ivr >= 50 else "depressed (IV cheap — buying premium is cheap)"
+
+    prompt = f"""Options analysis request for {name} ({ticker}) at ${price:.2f}.
+Outlook: {outlook.upper()}
+
+VOLATILITY ENVIRONMENT
+{iv_line}  {hv_line}  IVR: {ivr:.0f}/100 — {ivr_env}
+{'IV/HV ratio: ' + f'{atm_iv/hv_30d:.2f}x' if hv_30d and atm_iv else ''}
+
+EXPIRATIONS AVAILABLE
+{chr(10).join(exp_lines)}
+
+STRATEGIES RANKED BY POP
+{chr(10).join(strat_lines)}
+{best_desc}
+
+Write a thorough analysis with EXACTLY these four sections. Use specific numbers throughout.
+
+**IV ENVIRONMENT**
+Assess the current IV vs HV relationship, what IVR {ivr:.0f} means for premium buyers, and how the expected moves across expirations compare to typical realized volatility. Which expiration has the most favourable IV term structure?
+
+**TRADE THESIS**
+Why is {best['name'] if best else 'this setup'} the best fit for a {outlook} outlook on {ticker} right now? Explain the specific mechanics: why these strikes, why this expiration, what the {f"${best['max_loss']}" if best else "debit"} debit is buying you in terms of probability and leverage. Compare briefly to the other candidates and why they rank lower.
+
+**KEY LEVELS TO WATCH**
+What price levels matter most: breakeven(s), max profit trigger, and the nearest technical/structural levels implied by the strikes. What does a {f"{best['pos_delta']:+.3f}" if best else "moderate"} delta position mean for how quickly this position gains or loses with price movement?
+
+**RISK FACTORS**
+What are the top 2-3 specific risks that could invalidate this trade (time decay rate, IV crush on catalyst, directional failure)? At what point should the position be closed early? What does theta ${f"{best['pos_theta']:+.2f}" if best else 'N/A'}/day mean for how long you can hold if the trade goes sideways?"""
+
+    try:
+        result = await _llm.complete(_LLM_SYSTEM, prompt, max_tokens=1000)
+        return result if _llm_output_usable(result) else ""
+    except Exception as exc:
+        logger.warning("Options LLM analysis failed: %s", exc)
+        return ""
+
+
 def _build_web_output(
     ticker: str, name: str, price: float, outlook: str,
     atm_iv: float, ivr: float, hv_30d: float | None,
     term_label: str, source_label: str,
     chains: list[dict], strategies: list[dict], best: dict | None,
     dte_note: str | None = None, prev: dict | None = None,
+    llm_analysis: str = "",
 ) -> str:
     """Fully-styled HTML for web using hc-* design system. Never sent to Telegram."""
     parts: list[str] = []
@@ -1472,6 +1600,8 @@ class OptionsResearchAgent(BaseAgent):
             strategies = _generate_strategies(outlook, chains, price, dte_target=dte_target)
             best = strategies[0] if strategies else None
 
+            llm_analysis = ""
+
             # ── DTE alignment guardrail ───────────────────────────────────────
             dte_note: str | None = None
             if dte_target > 0 and best:
@@ -1572,6 +1702,7 @@ class OptionsResearchAgent(BaseAgent):
                 term_label=term_label, source_label=source_label,
                 chains=chains, strategies=strategies, best=best,
                 dte_note=dte_note, prev=prev,
+                llm_analysis=llm_analysis,
             )
 
             # Save this research to memory

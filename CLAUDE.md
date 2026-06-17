@@ -103,11 +103,13 @@ Every agent returns `AgentResult` (TypedDict in `agents/base_agent.py`):
 
 ### LLM situation
 
-Local model (LM Studio) frequently outputs `?????` garbage. `StockResearchAgent` and `FundamentalsAgent` guard against this with a `q_ratio` check and fall back to deterministic text.
+`StockResearchAgent` uses local LM Studio and guards against garbage output with a `q_ratio` check, falling back to deterministic text.
 
-`OptionsResearchAgent`, `UIResearcherAgent`, `UITestingAgent` — **zero LLM dependency**.
+`OptionsResearchAgent` and `FundamentalsAgent` use `mcp_servers.llm → get_llm_client()` — provider-agnostic, defaults to LM Studio, switch to Claude by setting `MCP_LLM_PROVIDER=anthropic` in `.env`. These agents prioritise analytical depth and pass large token budgets (700–1000 tokens).
 
-`ANTHROPIC_API_KEY` is in `.env`. Set `MCP_LLM_PROVIDER=anthropic` to switch all MCP servers to Claude.
+`UIResearcherAgent`, `UITestingAgent` — no LLM dependency.
+
+`ANTHROPIC_API_KEY` is in `.env`. Set `MCP_LLM_PROVIDER=anthropic` to switch all agents and MCP servers to Claude Sonnet.
 
 ### Data pull layer (`mcp_servers/data_pull/`)
 
@@ -143,8 +145,8 @@ To add a new MCP server: create `mcp_servers/<slug>/server.py`, add entry to `mc
 |---|---|
 | `data_pull` | Centralized market data (IBKR → yfinance); TTL cache; no LLM |
 | `stock_research` | Price/RSI/MA analysis + LLM narrative |
-| `fundamentals` | P/E, EPS, margins, quarterly revenue + LLM perspective |
-| `options_research` | Chain data, Black-Scholes, vertical spread ranking |
+| `fundamentals` | P/E, EPS, margins, quarterly revenue + deep LLM analysis (700 tokens) |
+| `options_research` | Chain data, Black-Scholes, vertical spread ranking + deep LLM analysis (800 tokens) |
 | `watchlist` | Persistent ticker list + live digest |
 | `summarizer` | Text NLP — summarize, extract entities, sentiment |
 | `heartbeat` | Probes all agent DBs; writes `heartbeat.db` |
@@ -182,20 +184,38 @@ All IBKR functionality goes through **IB Gateway** (TWS socket, port 4002 paper 
 
 ### Options research agent (`agents/options_research_agent.py`)
 
-**Active agent** for all options keywords. No LLM — pure data + math:
+**Active agent** for all options keywords. Uses `mcp_servers.llm → get_llm_client()` for analysis:
 
-1. `get_options_chain(ticker)` → IB Gateway first, yfinance fallback (via `mcp_servers.data_pull`)
+1. `get_options_chain(ticker)` → IB Gateway first, yfinance fallback (via `tools/market_data`)
 2. Filters chains by `term` param: `short` ≤ 45 DTE, `long` > 21 DTE (furthest chains)
-3. `_generate_strategies()` → vertical spreads only, ranked by POP: best 3 credit + best 2 debit
-4. Web output saved to `options_research_memory` for history replay
+3. `_generate_strategies()` → debit-only verticals (Long Call Spread, Long Put Spread), ranked by POP
+4. `_get_llm_analysis()` → 1000-token deep analysis with four structured sections:
+   - **IV Environment** — IV vs HV relationship, IVR interpretation, term structure
+   - **Trade Thesis** — why this strategy/strikes/expiry for this outlook; comparison to other candidates
+   - **Key Levels to Watch** — breakeven(s), max profit trigger, delta sensitivity
+   - **Risk Factors** — theta decay, IV crush, directional failure, exit criteria
+5. Analysis injected into Telegram output (`<pre>` block) and web output (`hc-section` card after recommendation header)
+6. Web output saved to `options_research_memory` for history replay
 
-**Debit calculator panel** (`_fmt_calc_panel`): interactive `hc-section` with two control rows:
+**Debit calculator panel** (`_web_debit_calculator`): interactive `hc-section` with two control rows:
 - **Debit slider** (green) — adjusts net debit per share; range `0.05` to `spread - 0.01`
 - **Qty slider** (blue) — adjusts number of contracts (1–20); syncs with the order form's `quantity` field
 
 The JS `calcUpdate(debit, qty)` in `server.py` updates: metric grid, Key Numbers table, Payoff table, Plotly chart — all multiplied by `qty`. Delta and theta also scale by contracts.
 
 `tools/options_math.py` — pure math: `bs_delta`, `bs_theta_daily`, `pop_credit_spread`, `pop_debit_spread`, `p50`, `ivr_rank`, `expected_move`.
+
+### Fundamentals agent (`agents/fundamentals_agent.py`)
+
+**v3.0.0** — uses `mcp_servers.llm → get_llm_client()` (not local LM Studio directly). No `q_ratio` garbage check — provider-agnostic client handles quality.
+
+Prompt feeds: all 6 quarters of revenue with QoQ deltas, gross + net margins, PE / fwd PE, D/E, computed PEG-like ratio (PE ÷ revenue growth), revenue trend label (accelerating / stable / decelerating).
+
+LLM produces four structured sections (700 tokens):
+- **Valuation Assessment** — cheap/fair/expensive, PE compression from trailing→forward, PEG interpretation, margin vs sector benchmarks
+- **Revenue Quality** — quarter-by-quarter trajectory, inflection points, whether momentum justifies valuation
+- **Profitability and Efficiency** — gross margin → pricing power, step-down to net margin → cost structure, D/E → leverage risk
+- **Catalysts and Risks** — 2 specific catalysts + 2 specific risks with exact numbers
 
 ### Web UI (`server.py`)
 
@@ -273,8 +293,9 @@ Runs on WSL2 with `networkingMode=mirrored` — `localhost` in WSL equals `local
 - **No web-side context clearing** — `memory.clear_context()` only fires in the Telegram path. If the same chat_id is shared between web and Telegram, web searches don't reset the Telegram memory.
 
 ### Options research
-- **Debit spreads only** — `_generate_strategies()` only builds bull-call and bear-put verticals. Credit spreads (bull-put, bear-call), iron condors, and calendars are not generated.
-- **Qty slider max is 20** — hardcoded in `_fmt_calc_panel`. The order form itself accepts up to 100 but the slider stops at 20; a user typing in the number input can exceed this.
+- **LLM analysis adds latency** — `_get_llm_analysis()` runs sequentially after strategy generation (not parallelised with data fetching). Response time is now dominated by the LLM call (~2–5s on LM Studio, ~1–2s on Claude). If speed matters, the LLM call can be fire-and-forget with streaming.
+- **Debit spreads only** — `_generate_strategies()` only builds Long Call Spread and Long Put Spread. Credit spreads (bull-put, bear-call), iron condors, and calendars are not generated.
+- **Qty slider max is 20** — hardcoded in `_web_debit_calculator`. The order form itself accepts up to 100 but the slider stops at 20; a user typing in the number input can exceed this.
 - **No multi-leg Plotly chart** — the P&L chart in the calc panel shows a single-spread payoff. For iron condors or future multi-leg strategies, the chart would need to sum leg payoffs.
 
 ### Web UI

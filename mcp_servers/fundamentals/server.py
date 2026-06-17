@@ -16,6 +16,7 @@ LLM:    claude-haiku-4-5-20251001
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -33,14 +34,28 @@ logger = logging.getLogger(__name__)
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 AGENT_DB = os.path.join(_ROOT, "db", "agents", "fundamentals.db")
 SYSTEM = (
-    "You are a fundamental analyst. Given a company's financial metrics, write a concise "
-    "2-3 sentence investment perspective covering valuation, growth quality, and balance "
-    "sheet strength. Be specific about the numbers. No disclaimers."
+    "You are a senior fundamental equity analyst. Given detailed financial data, write a "
+    "rigorous multi-section analysis. Be specific — quote exact figures, compute ratios "
+    "inline, explain what trends mean. No disclaimers, no generic filler."
 )
 
 _llm = get_llm_client()
 
 _db_ready = False
+
+
+def _output_usable(text: str) -> bool:
+    if not text or len(text) < 80:
+        return False
+    words = text.split()
+    repeats = sum(1 for a, b in zip(words, words[1:]) if a.lower() == b.lower())
+    if repeats > 3:
+        return False
+    if text.count("?") / len(text) > 0.03:
+        return False
+    if re.search(r'[^\x00-\x7F]{4,}|[.,:;!?]{4,}', text):
+        return False
+    return True
 
 
 def _utcnow() -> str:
@@ -159,25 +174,82 @@ async def get_company_fundamentals(ticker: str) -> str:
 
     pe       = data.get("pe_ratio", "N/A")
     fwd_pe   = data.get("forward_pe", "N/A")
+    eps      = data.get("eps_ttm", "N/A")
     margin   = data.get("profit_margin_pct", "N/A")
+    gmargin  = data.get("gross_margin_pct", "N/A")
     rev_yoy  = data.get("revenue_growth_yoy_pct", "N/A")
     de       = data.get("debt_to_equity", "N/A")
+    sector   = data.get("sector", "N/A")
+    name_str = data.get("company_name", ticker)
+    mcap     = data.get("market_cap")
+    mcap_str = f"${mcap/1e9:.1f}B" if mcap else "N/A"
+    qtrs     = data.get("quarterly_revenues", [])
 
-    prompt = (
-        f"{data.get('company_name', ticker)} ({ticker}):\n"
-        f"P/E: {pe} (forward: {fwd_pe}), Revenue YoY: {rev_yoy}%, "
-        f"Profit Margin: {margin}%, D/E: {de}.\n"
-        f"Write a 2-3 sentence investment perspective."
-    )
+    qtr_lines = []
+    for q in qtrs[-6:]:
+        qoq = f" ({'+' if (q.get('qoq_pct') or 0) >= 0 else ''}{q.get('qoq_pct', 'N/A')}% QoQ)" if q.get("qoq_pct") is not None else ""
+        qtr_lines.append(f"  {q['period']}: ${q['revenue_b']}B{qoq}")
 
+    rev_trend = "N/A"
+    if len(qtrs) >= 3:
+        recent_qoq = [q["qoq_pct"] for q in qtrs[-3:] if q.get("qoq_pct") is not None]
+        if recent_qoq:
+            avg_qoq = sum(recent_qoq) / len(recent_qoq)
+            rev_trend = "accelerating" if avg_qoq > 2 else ("decelerating" if avg_qoq < -2 else "stable")
+
+    peg_note = "N/A"
+    if pe != "N/A" and rev_yoy != "N/A":
+        try:
+            peg = float(pe) / float(rev_yoy) if float(rev_yoy) > 0 else None
+            if peg is not None:
+                peg_note = f"{peg:.1f}x"
+        except (TypeError, ValueError):
+            pass
+
+    prompt = f"""Fundamental analysis for {name_str} ({ticker}) in {sector}.
+Market Cap: {mcap_str}  |  EPS TTM: ${eps}
+
+VALUATION
+P/E (TTM): {pe}  |  Forward P/E: {fwd_pe}
+PE/Revenue Growth ratio: {peg_note}
+
+REVENUE
+YoY Growth: {rev_yoy}%  |  Trend: {rev_trend}
+Quarterly Revenue (last 6 quarters):
+{chr(10).join(qtr_lines) if qtr_lines else "  No quarterly data available"}
+
+PROFITABILITY
+Gross Margin: {gmargin}%  |  Net Margin: {margin}%
+
+BALANCE SHEET
+Debt/Equity: {de}
+
+Write a thorough analysis with EXACTLY these four sections. Use specific numbers throughout.
+
+**VALUATION ASSESSMENT**
+Is {name_str} cheap, fair, or expensive at {pe}x trailing and {fwd_pe}x forward P/E? What does the PE compression or expansion from trailing to forward imply about expected earnings growth? Interpret the PE/growth ratio ({peg_note}). Compare margins against typical {sector} benchmarks.
+
+**REVENUE QUALITY**
+Analyse the revenue trajectory. Walk through the most recent 3-4 quarters and call out any inflection or deceleration. Is {rev_trend} QoQ momentum a positive or negative signal at this valuation?
+
+**PROFITABILITY AND EFFICIENCY**
+What does {gmargin}% gross margin tell us about pricing power? How does the step-down from {gmargin}% gross to {margin}% net margin reflect cost structure? What does {de} debt/equity imply about financial leverage and risk?
+
+**CATALYSTS AND RISKS**
+Name 2 specific catalysts that could re-rate {name_str} higher and 2 specific risks. Be concrete — reference the actual numbers (e.g., what margin expansion is needed to justify the forward multiple, or what revenue growth would break the bull thesis)."""
+
+    commentary = None
     try:
-        commentary = await _llm.complete(SYSTEM, prompt, max_tokens=200)
+        raw = await _llm.complete(SYSTEM, prompt, max_tokens=700)
+        if _output_usable(raw):
+            commentary = raw
     except Exception as exc:
         logger.warning("LLM call failed: %s", exc)
+    if commentary is None:
         val = "stretched" if isinstance(pe, float) and pe > 30 else "fair" if isinstance(pe, float) and pe > 15 else "cheap"
         commentary = (
-            f"Valuation appears {val} at a {pe}x trailing P/E. "
-            f"Revenue is growing at {rev_yoy}% YoY with {margin}% profit margins."
+            f"Valuation: {pe}x trailing, {fwd_pe}x forward P/E — appears {val}. "
+            f"Revenue growing {rev_yoy}% YoY ({rev_trend} trend) with {margin}% net margins."
         )
 
     output = metrics_text + f"\n\nInvestment Perspective:\n{commentary}"
@@ -238,20 +310,41 @@ async def compare_companies(tickers_csv: str) -> str:
 
     table = "\n".join(rows)
 
-    prompt = (
-        f"Compare these companies on valuation and growth:\n"
-        + "\n".join(
-            f"{t}: P/E {d.get('pe_ratio','N/A')}, Rev YoY {d.get('revenue_growth_yoy_pct','N/A')}%, "
-            f"Margin {d.get('profit_margin_pct','N/A')}%"
-            for t, d in valid
-        )
-        + "\nWrite 2-3 sentences comparing investment merit."
+    def _mcap_str(d: dict) -> str:
+        mc = d.get("market_cap")
+        return f"${mc/1e9:.1f}B" if mc else "N/A"
+
+    company_details = "\n\n".join(
+        f"{t} ({d.get('company_name', t)}) [{d.get('sector', 'N/A')}] MktCap {_mcap_str(d)}:\n"
+        f"  P/E: {d.get('pe_ratio','N/A')}  Fwd P/E: {d.get('forward_pe','N/A')}  EPS: ${d.get('eps_ttm','N/A')}\n"
+        f"  Rev YoY: {d.get('revenue_growth_yoy_pct','N/A')}%  Gross Margin: {d.get('gross_margin_pct','N/A')}%  Net Margin: {d.get('profit_margin_pct','N/A')}%\n"
+        f"  D/E: {d.get('debt_to_equity','N/A')}"
+        for t, d in valid
     )
 
+    prompt = f"""Side-by-side fundamental comparison of {len(valid)} companies.
+
+{company_details}
+
+Write a thorough comparative analysis with EXACTLY these three sections:
+
+**VALUATION COMPARISON**
+Rank the companies by valuation attractiveness (cheapest to most expensive). For each, explain whether the multiple is justified by the growth rate and margins. Which offers the best value at current prices and why?
+
+**GROWTH AND PROFITABILITY**
+Compare revenue growth trajectories and margin profiles. Which company has the most durable competitive advantage implied by its gross margins? Which is compounding earnings fastest? Are any showing margin expansion or compression?
+
+**RELATIVE INVESTMENT CASE**
+If forced to rank these as long positions, what is the order and why? What is the biggest risk to the top-ranked name, and what would make you prefer one of the others instead?"""
+
+    commentary = None
     try:
-        commentary = await _llm.complete(SYSTEM, prompt, max_tokens=250)
+        raw = await _llm.complete(SYSTEM, prompt, max_tokens=500)
+        if _output_usable(raw):
+            commentary = raw
     except Exception as exc:
         logger.warning("LLM call failed: %s", exc)
+    if commentary is None:
         commentary = "Direct comparison: see metrics table above."
 
     suffix = f"\n\nErrors: {', '.join(errors)}" if errors else ""
