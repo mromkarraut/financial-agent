@@ -1,11 +1,10 @@
 """
-IB Gateway / TWS socket connection helpers using ib_insync.
+TWS socket connection helpers using ib_insync.
 
 Each MCP server calls connect_ib(client_id) to get its own IB instance.
 Connections are cached per client_id for the lifetime of the process.
 
-Paper trading port: 4002 (IB Gateway) / 7497 (TWS)
-Live trading port:  4001 (IB Gateway) / 7496 (TWS)
+Paper trading port: 7497  Live trading port: 7496
 """
 
 from __future__ import annotations
@@ -49,9 +48,9 @@ async def connect_ib(client_id: int, timeout: float = 20.0) -> IB:
         logger.info("IB connected clientId=%d port=%d", client_id, config.IBKR_TWS_PORT)
     except Exception as exc:
         raise ConnectionError(
-            f"Cannot connect to IB Gateway at {config.IBKR_TWS_HOST}:{config.IBKR_TWS_PORT} "
+            f"Cannot connect to TWS at {config.IBKR_TWS_HOST}:{config.IBKR_TWS_PORT} "
             f"(clientId={client_id}). "
-            f"Start IB Gateway and log in first. Error: {exc}"
+            f"Start TWS and log in first. Error: {exc}"
         )
     return ib
 

@@ -5,8 +5,8 @@ Centralized data fetching layer for all agents.
 
 Priority chain:
   Stock data:    yfinance (+ Polygon overlay if key set)
-  Fundamentals:  IB Gateway (Reuters Refinitiv) → Yahoo Finance
-  Options chain: IB Gateway (real-time) → Yahoo Finance (delayed)
+  Fundamentals:  TWS (Reuters Refinitiv) → Yahoo Finance
+  Options chain: TWS (real-time) → Yahoo Finance (delayed)
 
 Features over tools.market_data:
   - In-memory TTL cache (stock: 60s, fundamentals/options: 5min) avoids
@@ -175,7 +175,7 @@ async def get_stock_data(ticker: str) -> dict:
 async def get_fundamentals(ticker: str) -> dict:
     """
     P/E, forward P/E, EPS, revenue growth YoY, margins, debt/equity.
-    IB Gateway (Reuters Refinitiv) first; Yahoo Finance fallback.
+    TWS (Reuters Refinitiv) first; Yahoo Finance fallback.
     Cached 5min in memory.
     """
     ticker = ticker.strip().upper()
@@ -202,7 +202,7 @@ async def get_fundamentals(ticker: str) -> dict:
 async def get_options_chain(ticker: str) -> dict:
     """
     Full options chain: calls + puts per expiry, IVs, Greeks.
-    IB Gateway (real-time) first; Yahoo Finance (delayed) fallback.
+    TWS (real-time) first; Yahoo Finance (delayed) fallback.
     No yfinance chain fallback — returns error dict if both unavailable.
     Cached 5min in memory.
     """
@@ -233,14 +233,15 @@ async def get_source_status() -> dict:
 
     status: dict[str, str] = {}
 
-    # IBKR IB Gateway (TWS socket port 4002 paper / 4001 live)
-    for port, label in ((4002, "IB Gateway (paper)"), (4001, "IB Gateway (live)")):
-        try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=2)
-            s.close()
-            status[label] = "reachable"
-        except OSError:
-            status[label] = "unreachable"
+    # IBKR TWS (socket)
+    import config as _cfg
+    tws_label = f"TWS ({_cfg.IBKR_TWS_HOST}:{_cfg.IBKR_TWS_PORT})"
+    try:
+        s = socket.create_connection((_cfg.IBKR_TWS_HOST, _cfg.IBKR_TWS_PORT), timeout=2)
+        s.close()
+        status[tws_label] = "reachable"
+    except OSError:
+        status[tws_label] = "unreachable"
 
     # yfinance — quick ticker check
     try:

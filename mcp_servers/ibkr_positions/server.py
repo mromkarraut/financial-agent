@@ -1,7 +1,7 @@
 """
 IBKR Positions MCP Server  (ib_insync / TWS socket)
 
-Live portfolio positions, P&L, and allocation from IB Gateway.
+Live portfolio positions, P&L, and allocation from TWS.
 
 Tools:
   get_open_positions(account_id)   → all open positions with P&L
@@ -175,7 +175,7 @@ async def get_open_positions(account_id: str = "") -> str:
 @mcp.tool()
 async def get_live_pnl() -> str:
     """
-    Fetch live day P&L and unrealized P&L from IB Gateway.
+    Fetch live day P&L and unrealized P&L from TWS.
     """
     await _ensure_db()
     t0 = time.monotonic()

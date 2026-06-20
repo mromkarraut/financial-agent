@@ -8,8 +8,8 @@ Centralized market data agent. Single ingress point for all raw data:
 
 Priority for each data type:
   Stock data    → yfinance (+ Polygon real-time overlay if key set)
-  Fundamentals  → IB Gateway (Reuters Refinitiv) → Yahoo Finance
-  Options chain → IB Gateway (real-time) → Yahoo Finance (delayed)
+  Fundamentals  → TWS (Reuters Refinitiv) → Yahoo Finance
+  Options chain → TWS (real-time) → Yahoo Finance (delayed)
 
 Features:
   - In-memory TTL cache (stock: 60s, fundamentals/options: 5min)
@@ -131,7 +131,7 @@ async def fetch_fundamentals(ticker: str) -> str:
     Fetch company fundamental metrics for a ticker.
     Returns P/E, forward P/E, EPS, revenue growth YoY, profit/gross margins,
     debt/equity, market cap, dividend yield, and quarterly revenue trend.
-    Priority: IB Gateway (Reuters Refinitiv) → Yahoo Finance.
+    Priority: TWS (Reuters Refinitiv) → Yahoo Finance.
     Results cached 5 minutes in memory.
     """
     await _ensure_db()
@@ -194,7 +194,7 @@ async def fetch_options_chain(ticker: str) -> str:
     Fetch raw options chain data for a ticker as JSON.
     Returns current price, available expirations, and per-expiry chains
     with calls + puts (strike, bid, ask, IV, delta, gamma, theta, vega).
-    Priority: IB Gateway (real-time) → Yahoo Finance (delayed).
+    Priority: TWS (real-time) → Yahoo Finance (delayed).
     Strikes filtered to ±15% around current price.
     Results cached 5 minutes in memory.
     """
@@ -229,7 +229,7 @@ async def fetch_options_chain(ticker: str) -> str:
 async def check_data_sources() -> str:
     """
     Check reachability of all data sources:
-      - IB Gateway port 4002 (paper) and 4001 (live)
+      - TWS socket (host/port from IBKR_TWS_HOST / IBKR_TWS_PORT)
       - Yahoo Finance (yfinance)
     Also shows current in-memory cache size and fetch DB row count.
     """

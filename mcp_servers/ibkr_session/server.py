@@ -1,16 +1,16 @@
 """
 IBKR Session MCP Server  (ib_insync / TWS socket)
 
-Manages IB Gateway connection lifecycle: status, keepalive, account summary.
-Connects to IB Gateway at localhost:4002 (paper) or 4001 (live).
+Manages TWS connection lifecycle: status, keepalive, account summary.
+Connects to TWS at localhost:7497 (paper) or 7496 (live).
 
 Prerequisites:
-  1. Start IB Gateway: python start.py  (or run ibkr_gateway/start_ibgateway.bat)
-  2. Log in via the IB Gateway GUI
-  3. Enable API: Edit → Global Configuration → API → Settings → Socket port 4002
+  1. Start TWS: python start.py
+  2. Log in via the TWS GUI
+  3. Enable API: File → Global Configuration → API → Settings → Socket port 7497
 
 Tools:
-  get_connection_status()          → IB Gateway connection + account + mode
+  get_connection_status()          → TWS connection + account + mode
   get_account_summary(acct_id)     → net liq, cash, buying power, margins
   list_accounts()                  → all managed accounts
   get_session_log(limit)           → recent events from agent memory
@@ -97,7 +97,7 @@ async def _log_call(tool: str, ms: int) -> None:
 
 
 async def _keepalive_loop() -> None:
-    """Ping IB Gateway every 55s to keep the connection alive."""
+    """Ping TWS every 55s to keep the connection alive."""
     while True:
         await asyncio.sleep(55)
         try:
@@ -122,7 +122,7 @@ async def lifespan(server: FastMCP):
 mcp = FastMCP(
     name="ibkr-session",
     instructions=(
-        "IB Gateway session manager via ib_insync TWS socket. "
+        "TWS session manager via ib_insync socket. "
         "Auto-runs a 55s keepalive. Shows account type (paper/live) and connection state."
     ),
     lifespan=lifespan,
@@ -132,8 +132,8 @@ mcp = FastMCP(
 @mcp.tool()
 async def get_connection_status() -> str:
     """
-    Check IB Gateway connection status, account ID, and trading mode.
-    Attempts a live socket connection — shows clear error if gateway is not running.
+    Check TWS connection status, account ID, and trading mode.
+    Attempts a live socket connection — shows clear error if TWS is not running.
     """
     await _ensure_db()
     t0 = time.monotonic()
@@ -148,7 +148,7 @@ async def get_connection_status() -> str:
         await _log("status_check", True, account)
         await _log_call("get_connection_status", ms)
         return (
-            f"IB Gateway  ✅ Connected\n"
+            f"TWS  ✅ Connected\n"
             f"{'─'*36}\n"
             f"Mode       : {mode}\n"
             f"Accounts   : {', '.join(accounts)}\n"
@@ -162,20 +162,19 @@ async def get_connection_status() -> str:
         await _log("status_check", False, "", str(exc))
         await _log_call("get_connection_status", ms)
         return (
-            f"IB Gateway  ❌ Not connected\n\n"
+            f"TWS  ❌ Not connected\n\n"
             f"{exc}\n\n"
             f"Steps to fix:\n"
-            f"  1. Run: python start.py  (starts IB Gateway automatically)\n"
-            f"     OR:  run ibkr_gateway/start_ibgateway.bat\n"
+            f"  1. Run: python start.py  (or start TWS manually on Windows)\n"
             f"  2. Log in with {'paper' if config.IBKR_PAPER_TRADING else 'live'} credentials\n"
-            f"  3. Enable API: Edit → Global Configuration → API → Settings\n"
+            f"  3. Enable API: File → Global Configuration → API → Settings\n"
             f"     Socket port: {config.IBKR_TWS_PORT}"
         )
 
 
 @mcp.tool()
 async def list_accounts() -> str:
-    """List all managed accounts on this IB Gateway connection."""
+    """List all managed accounts on this TWS connection."""
     await _ensure_db()
     t0 = time.monotonic()
     try:

@@ -54,35 +54,20 @@ MCP_LLM_BASE_URL: str = os.environ.get("MCP_LLM_BASE_URL", os.environ.get("LMSTU
 MCP_LLM_MAX_TOKENS: int = int(os.environ.get("MCP_LLM_MAX_TOKENS", "512"))
 OPENAI_API_KEY: str   = os.environ.get("OPENAI_API_KEY", "")
 
-# ── IBKR Gateway ──────────────────────────────────────────────────────────────
+# ── IBKR TWS ──────────────────────────────────────────────────────────────────
 # IBKR_PAPER_TRADING=true (default) — use paper trading account (DU prefix).
 # IBKR_PAPER_TRADING=false          — use live account (U prefix). REAL MONEY.
 #
-# Gateway is auto-started by start.py. To run manually:
-#   cd ibkr_gateway && ./bin/run.sh root/conf.paper.yaml
-# Then open https://localhost:5000 in Chrome and log in with PAPER credentials.
-#
 _ibkr_paper_raw = os.environ.get("IBKR_PAPER_TRADING", "true").strip().lower()
 IBKR_PAPER_TRADING: bool = _ibkr_paper_raw in ("1", "true", "yes")
-IBKR_GATEWAY_CONF: str   = os.environ.get(
-    "IBKR_GATEWAY_CONF",
-    "root/conf.paper.yaml" if IBKR_PAPER_TRADING else "root/conf.yaml",
-)
-IBKR_GATEWAY_URL: str  = os.environ.get("IBKR_GATEWAY_URL", "https://localhost:5000")
-IBKR_GATEWAY_DIR: str  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ibkr_gateway")
-# Java executable — uses Windows Java via WSL interop by default
-IBKR_JAVA_BIN: str = os.environ.get(
-    "IBKR_JAVA_BIN",
-    "/mnt/c/Program Files/Java/jre1.8.0_461/bin/java.exe",
-)
 
-# ── TWS / IB Gateway socket connection (ib_insync) ────────────────────────────
-# IB Gateway paper port: 4002  live port: 4001
-# TWS            paper port: 7497  live port: 7496
+# ── TWS socket connection (ib_insync) ─────────────────────────────────────────
+# TWS paper port: 7497  live port: 7496
+# Set IBKR_TWS_HOST to the Windows machine IP when running on native Linux.
 IBKR_TWS_HOST: str = os.environ.get("IBKR_TWS_HOST", "127.0.0.1")
 IBKR_TWS_PORT: int = int(os.environ.get(
     "IBKR_TWS_PORT",
-    "4002" if IBKR_PAPER_TRADING else "4001",   # IB Gateway defaults
+    "7497" if IBKR_PAPER_TRADING else "7496",
 ))
 # clientId range 1-4 reserved for the 4 IBKR MCP servers; 5 = options research (main bot process)
 IBKR_CLIENT_ID_SESSION:          int = int(os.environ.get("IBKR_CLIENT_ID_SESSION",          "1"))
@@ -90,7 +75,7 @@ IBKR_CLIENT_ID_POSITIONS:        int = int(os.environ.get("IBKR_CLIENT_ID_POSITI
 IBKR_CLIENT_ID_ORDERS:           int = int(os.environ.get("IBKR_CLIENT_ID_ORDERS",           "3"))
 IBKR_CLIENT_ID_MARKET_DATA:      int = int(os.environ.get("IBKR_CLIENT_ID_MARKET_DATA",      "4"))
 IBKR_CLIENT_ID_OPTIONS_RESEARCH: int = int(os.environ.get("IBKR_CLIENT_ID_OPTIONS_RESEARCH", "5"))
-IBKR_GATEWAY_EXE: str = os.environ.get(
-    "IBKR_GATEWAY_EXE",
-    r"C:\Jts\ibgateway\1039\ibgateway.exe",
+IBKR_TWS_EXE: str = os.environ.get(
+    "IBKR_TWS_EXE",
+    r"C:\Jts\tws.exe",
 )

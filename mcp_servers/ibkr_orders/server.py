@@ -1,7 +1,7 @@
 """
 IBKR Orders MCP Server  (ib_insync / TWS socket)
 
-Place, cancel, and review vertical spread orders via IB Gateway.
+Place, cancel, and review vertical spread orders via TWS.
 
 Tools:
   place_spread(...)             → submit a vertical spread order
@@ -148,7 +148,7 @@ async def place_spread(
     tif: str = "DAY",
 ) -> str:
     """
-    Place a vertical spread via IB Gateway socket.
+    Place a vertical spread via TWS socket.
 
     ticker:       Stock symbol (e.g. AAPL)
     short_strike: Strike you sell (higher put / lower call for credit spreads)

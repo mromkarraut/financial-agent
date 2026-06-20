@@ -19,7 +19,7 @@ import logging
 import aiosqlite
 import uvicorn
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import config
 from agents.options_research_agent import OptionsResearchAgent
@@ -1342,7 +1342,7 @@ async def _build_positions_html() -> str:
 
     # P&L metric grid
     if "error" in pnl:
-        pnl_html = f'<div class="hc-alert hc-alert-error" style="margin:16px">IB Gateway offline: {pnl["error"]}</div>'
+        pnl_html = f'<div class="hc-alert hc-alert-error" style="margin:16px">TWS offline: {pnl["error"]}</div>'
     else:
         def _pv(v: float) -> str:
             return f'{"+" if v >= 0 else ""}${abs(v):,.2f}'

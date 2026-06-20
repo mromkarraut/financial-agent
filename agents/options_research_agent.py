@@ -862,7 +862,7 @@ def _fmt_order_button(s: dict, ticker: str) -> str:
     suffix      = f"· {ticker} {right} {s['sell_strike']:.0f}/{s['buy_strike']:.0f} {s['exp']}"
     return (
         f'<div class="order-panel">'
-        f'<div class="order-panel-label">📋 Recommended trade — place via IB Gateway</div>'
+        f'<div class="order-panel-label">📋 Recommended trade — place via TWS</div>'
         f'<form hx-post="/api/place-order" hx-target="#order-result" hx-swap="innerHTML" hx-indicator="#order-spinner">'
         f'<input type="hidden" name="ticker"       value="{ticker}">'
         f'<input type="hidden" name="short_strike" value="{s["sell_strike"]}">'

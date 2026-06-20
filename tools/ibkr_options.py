@@ -2,11 +2,11 @@
 IBKR options chain fetch via ib_insync TWS socket.
 
 Primary data source for options research agents. Falls back gracefully
-(returns {"error": ...}) if IB Gateway is not connected, allowing the
+(returns {"error": ...}) if TWS is not connected, allowing the
 caller to fall through to yfinance.
 
 Data flow:
-  1. Connect to IB Gateway (client ID from config.IBKR_CLIENT_ID_OPTIONS_RESEARCH)
+  1. Connect to TWS (client ID from config.IBKR_CLIENT_ID_OPTIONS_RESEARCH)
   2. Qualify underlying stock → get conId + company name
   3. reqMktData(underlying) → poll until price arrives (up to 5 min)
   4. reqSecDefOptParams → available expirations + strikes
@@ -88,7 +88,7 @@ async def _wait_for_fills(
 
 async def get_options_chain_ibkr(ticker: str) -> dict:
     """
-    Fetch options chain from IB Gateway via ib_insync.
+    Fetch options chain from TWS via ib_insync.
 
     Returns the same structure as tools.market_data.get_options_chain():
       {ticker, current_price, company_name, available_expirations,
