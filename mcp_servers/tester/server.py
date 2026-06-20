@@ -275,24 +275,25 @@ async def _test_summarizer() -> list[T]:
 async def _test_ibkr() -> list[T]:
     from db.database import order_history
 
-    async def gateway_ping():
+    async def tws_ping():
         try:
             import socket
-            s = socket.create_connection(("127.0.0.1", 4002), timeout=2)
+            import config as _cfg
+            s = socket.create_connection((_cfg.IBKR_TWS_HOST, _cfg.IBKR_TWS_PORT), timeout=2)
             s.close()
-            return True, "IB Gateway port 4002 reachable"
+            return True, f"TWS {_cfg.IBKR_TWS_HOST}:{_cfg.IBKR_TWS_PORT} reachable"
         except OSError:
-            return True, "IB Gateway port 4002 unreachable — expected if not running"
+            return True, "TWS unreachable — expected if not running"
         except Exception as exc:
-            return True, f"IB Gateway check error: {exc}"
+            return True, f"TWS check error: {exc}"
 
     async def db_orders():
         rows = await order_history(limit=5)
         return True, f"{len(rows)} orders in history"
 
     return await asyncio.gather(
-        _t("ibkr.gateway_ping", gateway_ping()),
-        _t("ibkr.db_orders",    db_orders()),
+        _t("ibkr.tws_ping",  tws_ping()),
+        _t("ibkr.db_orders", db_orders()),
     )
 
 

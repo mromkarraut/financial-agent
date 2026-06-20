@@ -59,8 +59,8 @@ REGISTRY: dict[str, AgentEntry] = {
         "name": "Data Pull Agent",
         "description": (
             "Centralized market data ingress: stock snapshots (yfinance + Polygon), "
-            "fundamentals (IB Gateway Reuters → Yahoo Finance), and options chains "
-            "(IB Gateway real-time only). In-memory TTL cache prevents duplicate "
+            "fundamentals (TWS Reuters → Yahoo Finance), and options chains "
+            "(TWS real-time only). In-memory TTL cache prevents duplicate "
             "API calls across agents. Every fetch logged to data_pull.db. "
             "No LLM — pure data fetching."
         ),
@@ -447,7 +447,7 @@ REGISTRY: dict[str, AgentEntry] = {
         "name": "Heartbeat Agent",
         "description": (
             "System health monitor for all MCP agents. Probes each agent's memory DB, "
-            "call recency, and dependencies (IBKR gateway auth). Writes results to "
+            "call recency, and TWS connectivity. Writes results to "
             "heartbeat.db so the registry and summarizer can read health status without "
             "direct inter-process communication."
         ),
@@ -455,7 +455,7 @@ REGISTRY: dict[str, AgentEntry] = {
         "capabilities": [
             "health_monitoring",
             "db_probe",
-            "gateway_probe",
+            "tws_probe",
             "call_recency_tracking",
             "system_snapshots",
         ],
@@ -496,9 +496,9 @@ REGISTRY: dict[str, AgentEntry] = {
         "slug": "ibkr_session",
         "name": "IBKR Session Agent",
         "description": (
-            "CP Gateway session lifecycle: auth status, 55s tickle keepalive (auto-started), "
-            "reauthentication, account listing, and account summary. "
-            "Start gateway: cd ibkr_gateway && ./bin/run.sh root/conf.yaml"
+            "TWS session lifecycle via ib_insync: connection status, 55s keepalive (auto-started), "
+            "account listing, and account summary. "
+            "Requires TWS running on Windows with API socket enabled."
         ),
         "version": "1.0.0",
         "capabilities": ["session_management", "auth_check", "tickle_keepalive", "account_listing"],
@@ -508,7 +508,7 @@ REGISTRY: dict[str, AgentEntry] = {
         "transport": "stdio",
         "command": ["python", "-m", "mcp_servers.ibkr_session.server"],
         "tools": [
-            {"name": "get_auth_status",      "description": "Check gateway auth + connection state.", "parameters": {}},
+            {"name": "get_auth_status",      "description": "Check TWS auth + connection state.", "parameters": {}},
             {"name": "reauthenticate_session","description": "Re-open brokerage session without browser.", "parameters": {}},
             {"name": "list_accounts",        "description": "List all linked account IDs.", "parameters": {}},
             {"name": "get_account_details",  "description": "Net liq, cash, buying power for an account.",
@@ -522,7 +522,7 @@ REGISTRY: dict[str, AgentEntry] = {
         "slug": "ibkr_positions",
         "name": "IBKR Positions Agent",
         "description": (
-            "Live portfolio positions, P&L, and account allocation from CP Gateway. "
+            "Live portfolio positions, P&L, and account allocation via TWS. "
             "Generates LLM portfolio narrative. Also provides asset-class allocation breakdown."
         ),
         "version": "1.0.0",
@@ -546,7 +546,7 @@ REGISTRY: dict[str, AgentEntry] = {
         "slug": "ibkr_orders",
         "name": "IBKR Orders Agent",
         "description": (
-            "Place, confirm, cancel, and review vertical spread orders via CP Gateway. "
+            "Place, confirm, cancel, and review vertical spread orders via TWS. "
             "Includes LLM pre-trade risk briefing and persisted order history."
         ),
         "version": "1.0.0",
@@ -756,7 +756,7 @@ REGISTRY: dict[str, AgentEntry] = {
         "name": "IBKR Market Data Agent",
         "description": (
             "Contract lookup (conid), live market snapshots (bid/ask/last/Greeks), "
-            "option strike discovery, and contract search via CP Gateway. "
+            "option strike discovery, and contract search via TWS. "
             "Conid results cached in SQLite."
         ),
         "version": "1.0.0",

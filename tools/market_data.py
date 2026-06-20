@@ -1,8 +1,8 @@
 """
-Market data wrapper — yfinance + Polygon.io (real-time) + IB Gateway.
+Market data wrapper — yfinance + Polygon.io (real-time) + TWS.
 
-Options chain: IB Gateway only (real-time via ib_insync).
-Returns error if IB Gateway is unavailable — no fallback for chains.
+Options chain: TWS only (real-time via ib_insync).
+Returns error if TWS is unavailable — no fallback for chains.
 
 Price / HV / company metadata comes from yfinance (+ Polygon overlay if key set).
 
@@ -447,7 +447,7 @@ def _fetch_fundamentals_edgar_sync(ticker: str) -> dict:
 
 
 def _parse_ibkr_fundamentals_xml(xml: str, ticker: str) -> dict:
-    """Parse Reuters/Refinitiv ReportSnapshot XML from IB Gateway into our standard dict."""
+    """Parse Reuters/Refinitiv ReportSnapshot XML from TWS into our standard dict."""
     import xml.etree.ElementTree as ET
     root = ET.fromstring(xml)
 
@@ -482,13 +482,13 @@ def _parse_ibkr_fundamentals_xml(xml: str, ticker: str) -> dict:
         "roe_pct":                 _ratio("TTMROEPCT"),
         "market_cap":              mcap_m * 1e6 if mcap_m else None,
         "dividend_yield_pct":      _ratio("YIELD"),
-        "source":                  "IB Gateway (Reuters Refinitiv)",
+        "source":                  "TWS (Reuters Refinitiv)",
         "source_url":              "",
     }
 
 
 async def _get_fundamentals_ibkr(ticker: str) -> dict | None:
-    """Try IB Gateway reqFundamentalData. Returns None if unavailable."""
+    """Try TWS reqFundamentalData. Returns None if unavailable."""
     try:
         from tools.ibkr_tws import connect_ib
         import config as _cfg
@@ -527,7 +527,7 @@ async def _get_fundamentals_edgar(ticker: str) -> dict | None:
 async def get_fundamentals(ticker: str) -> dict:
     """Returns PE, forward PE, EPS, revenue growth, debt/equity, margins.
 
-    Priority: IB Gateway (Reuters Refinitiv) → SEC EDGAR (edgartools) → Yahoo Finance.
+    Priority: TWS (Reuters Refinitiv) → SEC EDGAR (edgartools) → Yahoo Finance.
 
     IBKR and EDGAR are launched concurrently so the ~15s IBKR timeout doesn't
     block EDGAR (which typically responds in ~2s).  IBKR wins if it finishes
@@ -550,7 +550,7 @@ async def get_fundamentals(ticker: str) -> dict:
                 ibkr = await asyncio.wait_for(asyncio.shield(ibkr_task), timeout=2.0)
                 if ibkr:
                     ibkr_task.cancel()
-                    logger.info("get_fundamentals(%s): using IB Gateway data", ticker)
+                    logger.info("get_fundamentals(%s): using TWS data", ticker)
                     return ibkr
             except (asyncio.TimeoutError, Exception):
                 pass
@@ -560,15 +560,15 @@ async def get_fundamentals(ticker: str) -> dict:
         # EDGAR failed — wait for IBKR to finish
         ibkr = await ibkr_task
         if ibkr:
-            logger.info("get_fundamentals(%s): using IB Gateway data", ticker)
+            logger.info("get_fundamentals(%s): using TWS data", ticker)
             return ibkr
 
-    # IBKR finished first (gateway is running and fast)
+    # IBKR finished first (TWS is running and fast)
     elif ibkr_task in done:
         ibkr = ibkr_task.result()
         if ibkr:
             edgar_task.cancel()
-            logger.info("get_fundamentals(%s): using IB Gateway data", ticker)
+            logger.info("get_fundamentals(%s): using TWS data", ticker)
             return ibkr
         # IBKR failed — wait for EDGAR
         edgar = await edgar_task
@@ -581,7 +581,7 @@ async def get_fundamentals(ticker: str) -> dict:
         ibkr  = ibkr_task.result()
         edgar = edgar_task.result()
         if ibkr:
-            logger.info("get_fundamentals(%s): using IB Gateway data", ticker)
+            logger.info("get_fundamentals(%s): using TWS data", ticker)
             return ibkr
         if edgar:
             logger.info("get_fundamentals(%s): using SEC EDGAR data", ticker)
@@ -681,7 +681,7 @@ def _fetch_options_chain_sync(ticker: str) -> dict:
 async def get_options_chain(ticker: str) -> dict:
     """
     Returns current price, expirations, and options chain (calls+puts).
-    Priority: IB Gateway (real-time) → Yahoo Finance (delayed).
+    Priority: TWS (real-time) → Yahoo Finance (delayed).
     """
     try:
         from tools.ibkr_options import get_options_chain_ibkr
@@ -692,8 +692,8 @@ async def get_options_chain(ticker: str) -> dict:
             for opt in ch.get("calls", []) + ch.get("puts", [])
         )
         if "error" not in ibkr_data and chains_ok:
-            logger.info("get_options_chain(%s): using IB Gateway data", ticker)
-            ibkr_data["source"] = "IB Gateway"
+            logger.info("get_options_chain(%s): using TWS data", ticker)
+            ibkr_data["source"] = "TWS"
             return ibkr_data
         reason = ibkr_data.get("error") or ("no live quotes" if ibkr_data.get("chains") else "empty chains")
         logger.info("get_options_chain(%s): IBKR unavailable (%s) — falling back to yfinance", ticker, reason)
@@ -705,7 +705,7 @@ async def get_options_chain(ticker: str) -> dict:
         if data.get("chains"):
             logger.info("get_options_chain(%s): using Yahoo Finance data", ticker)
             return data
-        return {"error": f"No options chain data available for {ticker} from IB Gateway or Yahoo Finance."}
+        return {"error": f"No options chain data available for {ticker} from TWS or Yahoo Finance."}
     except Exception as exc:
         logger.error("get_options_chain(%s) yfinance fallback failed: %s", ticker, exc)
         return {"error": str(exc)}

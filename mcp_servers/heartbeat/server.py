@@ -3,7 +3,7 @@ Heartbeat MCP Server
 
 Monitors the health of every MCP agent by probing:
   - Agent memory DB accessibility and call recency
-  - IBKR CP Gateway auth status (for the IBKR agent)
+  - IBKR TWS connectivity (for the IBKR agents)
   - Whether core dependencies (yfinance, anthropic, aiosqlite) are importable
 
 Results are written to db/agents/heartbeat.db so the registry and summarizer
@@ -288,18 +288,19 @@ async def _probe_tester() -> ProbeResult:
 
 
 async def _probe_ibkr_session() -> ProbeResult:
-    """ibkr_session probe: standard DB check + IB Gateway TWS socket ping."""
+    """ibkr_session probe: standard DB check + TWS socket ping."""
     result = await _probe_standard("ibkr_session")
     gateway_note = ""
     try:
         import socket
-        s = socket.create_connection(("127.0.0.1", 4002), timeout=2)
+        import config as _cfg
+        s = socket.create_connection((_cfg.IBKR_TWS_HOST, _cfg.IBKR_TWS_PORT), timeout=2)
         s.close()
-        gateway_note = " | IB Gateway port 4002: reachable"
+        gateway_note = f" | TWS {_cfg.IBKR_TWS_HOST}:{_cfg.IBKR_TWS_PORT}: reachable"
     except OSError:
-        gateway_note = " | IB Gateway port 4002: unreachable"
+        gateway_note = f" | TWS: unreachable"
     except Exception as exc:
-        gateway_note = f" | IB Gateway: {exc}"
+        gateway_note = f" | TWS: {exc}"
     return ProbeResult(
         result.status,
         result.latency_ms,
@@ -366,7 +367,7 @@ async def check_all_agents() -> str:
     """
     Probe all MCP agents concurrently and return a live status table.
     Checks DB accessibility, call count, and recency for each agent.
-    IBKR also checks CP Gateway auth. Results are persisted to heartbeat.db.
+    IBKR agents also check TWS connectivity. Results are persisted to heartbeat.db.
     """
     await _ensure_db()
     t0 = time.monotonic()

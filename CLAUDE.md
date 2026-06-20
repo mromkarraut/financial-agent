@@ -9,13 +9,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 source /home/omkar/venvs/bin/activate
 
 # Start everything (recommended)
-python start.py                # IB Gateway + web + Telegram bot (paper trading)
+python start.py                # TWS + web + Telegram bot (paper trading)
 python start.py --no-lms      # skip LM Studio (already running)
-python start.py --no-gateway  # skip IB Gateway (already running)
+python start.py --live        # LIVE trading account (real money — use with caution)
 python start.py --live        # LIVE trading account (real money — use with caution)
 python start.py --web-only    # web dashboard only, no Telegram bot
 
-# Logs → logs/web.log, logs/gateway.log
+# Logs → logs/web.log
 
 # DB migration (run after adding tables to database.py)
 python -c "import asyncio; from db.database import init_db; asyncio.run(init_db())"
@@ -121,8 +121,8 @@ from mcp_servers.data_pull import get_stock_data, get_fundamentals, get_options_
 
 Priority chain:
 - **Stock data**: yfinance (+ Polygon overlay if `POLYGON_API_KEY` set)
-- **Fundamentals**: IB Gateway (Reuters Refinitiv) → SEC EDGAR via edgartools → Yahoo Finance
-- **Options chain**: IB Gateway (real-time) → Yahoo Finance (delayed)
+- **Fundamentals**: TWS (Reuters Refinitiv) → SEC EDGAR via edgartools → Yahoo Finance
+- **Options chain**: TWS (real-time) → Yahoo Finance (delayed)
 
 Features: in-memory TTL cache (stock 60s, fundamentals/options 5min), every fetch logged to `db/agents/data_pull.db` with source + latency + cache-hit flag.
 
@@ -130,7 +130,7 @@ Features: in-memory TTL cache (stock 60s, fundamentals/options 5min), every fetc
 
 ### MCP server layer
 
-15 independent MCP servers in `mcp_servers/`. Claude Code auto-starts them via `.claude/settings.json`. Each server:
+14 active MCP servers in `mcp_servers/`. (`mcp_servers/ibkr/` is a legacy directory for the old CP Gateway REST integration — it still exists on disk but is not registered or used; the four `ibkr_*` TWS-socket servers replaced it.) Claude Code auto-starts them via `.claude/settings.json`. Each server:
 - Uses `FastMCP` with `instructions=` (not `description=`) for the server-level string
 - Has its own per-agent SQLite DB under `db/agents/<slug>.db`
 - Gets its LLM via `mcp_servers/llm.py → get_llm_client()` — never import `anthropic` directly
@@ -160,7 +160,7 @@ To add a new MCP server: create `mcp_servers/<slug>/server.py`, add entry to `mc
 
 ### IBKR integration (ib_insync TWS socket)
 
-All IBKR functionality goes through **IB Gateway** (TWS socket, port 4002 paper / 4001 live) via `ib_insync`. The CP Gateway (REST, port 5000) has been removed.
+All IBKR functionality goes through **TWS** (Trader Workstation, port 7497 paper / 7496 live) via `ib_insync`.
 
 **Connection helpers** — `tools/ibkr_tws.py → connect_ib(client_id)`:
 - Returns a cached `IB` instance keyed by `(client_id, id(event_loop))` — prevents cross-loop reuse between uvicorn and test scripts
@@ -172,21 +172,26 @@ All IBKR functionality goes through **IB Gateway** (TWS socket, port 4002 paper 
 - `register_event_loop(loop)` must be called at server startup (already in `server.py`) so ib_insync reader threads can schedule callbacks back to uvicorn's loop
 - `asyncio.set_event_loop(loop)` also called at startup for non-async thread compatibility
 
-**IB Gateway setup:**
-- Must be running (`C:\Jts\ibgateway\1039\ibgateway.exe`) and logged in
-- API enabled: Configure → Settings → API → Enable ActiveX and Socket Clients, port 4002
-- "Allow connections from localhost only" checked — suppresses per-connection dialog
-- `TrustedIPs=127.0.0.1,10.5.0.2` in `C:\Jts\ibgateway\1039\jts.ini`
+**TWS setup — two modes:**
 
-**Reuters Fundamentals (error 10358)** — not available on demo account `DUM941592`. `get_fundamentals()` tries `reqFundamentalDataAsync("ReportSnapshot")` first; falls back to Yahoo Finance. Auto-uses IB on live accounts with Reuters subscription.
+*WSL mode* (default when running inside WSL): `start.py` auto-launches `IBKR_TWS_EXE` via `cmd.exe` and waits up to 120s for GUI login:
+- API: File → Global Configuration → API → Settings → Enable ActiveX and Socket Clients, port 7497
+- "Allow connections from localhost only" checked — suppresses per-connection dialog
+
+*Native Linux mode* (detected via `/proc/version`): TWS must be started manually on the Windows machine; `start.py` prints one-time setup instructions and waits up to 120s:
+- Uncheck "Allow connections from localhost only" (remote IP, not loopback)
+- Add this machine's LAN IP to `TrustedIPs` in `C:\Jts\<ver>\jts.ini`
+- Set `IBKR_TWS_HOST=<windows-ip>` in `.env`
+
+**Reuters Fundamentals (error 10358)** — not available on demo account `DUM941592`. `get_fundamentals()` tries `reqFundamentalDataAsync("ReportSnapshot")` first; falls back to Yahoo Finance. Auto-uses TWS on live accounts with Reuters subscription.
 
 **Spread construction:** `make_vertical_spread()` builds a BAG combo contract from two `ComboLeg` objects. Credit = SELL short_conid, BUY long_conid. Debit = reversed.
 
 ### Options research agent (`agents/options_research_agent.py`)
 
-**Active agent** for all options keywords. Uses `mcp_servers.llm → get_llm_client()` for analysis:
+**Active agent** for all options keywords. (`agents/options_agent.py` is a legacy file — it predates the MCP data layer and is no longer dispatched by the orchestrator; ignore it when working on options features.) Uses `mcp_servers.llm → get_llm_client()` for analysis:
 
-1. `get_options_chain(ticker)` → IB Gateway first, yfinance fallback (via `tools/market_data`)
+1. `get_options_chain(ticker)` → TWS first, yfinance fallback (via `tools/market_data`)
 2. Filters chains by `term` param: `short` ≤ 45 DTE, `long` > 21 DTE (furthest chains)
 3. `_generate_strategies()` → debit-only verticals (Long Call Spread, Long Put Spread), ranked by POP
 4. `_get_llm_analysis()` → 1000-token deep analysis with four structured sections:
@@ -267,17 +272,20 @@ New tables via `CREATE TABLE IF NOT EXISTS` in `db/database.py → init_db()`. S
 | `ANTHROPIC_API_KEY` | — | Set; use `MCP_LLM_PROVIDER=anthropic` to activate |
 | `MCP_LLM_PROVIDER` | `lmstudio` | `lmstudio` \| `anthropic` \| `openai` |
 | `MCP_LLM_MODEL` | (falls back to `LLM_MODEL`) | |
+| `MCP_LLM_BASE_URL` | (falls back to `LMSTUDIO_BASE_URL`) | Base URL for lmstudio/openai providers |
+| `MCP_LLM_MAX_TOKENS` | `512` | Default token budget per MCP server completion |
+| `OPENAI_API_KEY` | — | Required when `MCP_LLM_PROVIDER=openai` |
 | `POLYGON_API_KEY` | — | Optional; real-time quotes over yfinance |
 | `EDGAR_IDENTITY` | `Financial Agent research@example.com` | SEC EDGAR User-Agent (`Name email`); required by SEC fair-use policy |
 | `IBKR_PAPER_TRADING` | `true` | Set `false` for live (real money) |
 | `IBKR_TWS_HOST` | `127.0.0.1` | |
-| `IBKR_TWS_PORT` | `4002` (paper) / `4001` (live) | IB Gateway socket port |
-| `IBKR_GATEWAY_EXE` | `C:\Jts\ibgateway\1039\ibgateway.exe` | |
+| `IBKR_TWS_PORT` | `7497` (paper) / `7496` (live) | TWS socket port |
+| `IBKR_TWS_EXE` | `C:\Jts\tws.exe` | TWS exe path (WSL mode only) |
 | `DB_PATH` | `db/state.db` | |
 
 ### WSL2 / networking
 
-Runs on WSL2 with `networkingMode=mirrored` — `localhost` in WSL equals `localhost` on Windows. cloudflared auto-started by `main.py`, sets `WEB_SERVER_URL` to the live public tunnel URL.
+`start.py` auto-detects WSL via `/proc/version` and picks the appropriate IBKR launch strategy. In WSL2 with `networkingMode=mirrored`, `localhost` in WSL equals `localhost` on Windows. In native Linux, set `IBKR_TWS_HOST` to the Windows machine's LAN IP. cloudflared is auto-started by `main.py` and sets `WEB_SERVER_URL` to the live public tunnel URL.
 
 ## Known issues and future improvements
 
@@ -285,8 +293,8 @@ Runs on WSL2 with `networkingMode=mirrored` — `localhost` in WSL equals `local
 - **`data_pull` cache is in-process only** — each MCP server process and the uvicorn server maintain separate `_cache` dicts. A short-TTL Redis or SQLite-backed cache would deduplicate IBKR calls across processes.
 - **`FundamentalsAgent` confidence bug** — `yf.Ticker(x).info` returns a partial dict even for non-existent tickers, so `FundamentalsAgent` always returns `confidence=0.85`. The fix is to validate that `company_name != ticker` and `market_cap is not None` before reporting success.
 - **yfinance options chain missing Greeks** — when IBKR is unavailable, the yfinance fallback returns bid/ask/IV but no delta/gamma/theta/vega. Black-Scholes approximations from `tools/options_math.py` could fill these in from the IV.
-- **IBKR paper account limitations** — error 10358 (Reuters fundamentals not available on DU* accounts) and error 10089 (market data subscription missing for options) are expected on `DUM941592`. Positions show `$0.00` unrealized P&L because live quotes require a market data subscription.
-- **IBKR generic tick list error 321** — options contracts reject `genericTickList="106,107"` on paper accounts; only `106` (impvolat) is valid for OPT. `tools/ibkr_options.py` should be updated to request only `"106"`.
+- **TWS paper account limitations** — error 10358 (Reuters fundamentals not available on DU* accounts) and error 10089 (market data subscription missing for options) are expected on `DUM941592`. Positions show `$0.00` unrealized P&L because live quotes require a market data subscription.
+- **TWS generic tick list error 321** — options contracts reject `genericTickList="106,107"` on paper accounts; only `106` (impvolat) is valid for OPT. `tools/ibkr_options.py` should be updated to request only `"106"`.
 
 ### Orchestrator / routing
 - **Ticker regex false positives** — `_TICKER_RE` matches any 2–5 uppercase letter sequence. Common English words not in `_SKIP_WORDS` (e.g. "WHAT", "DOES", "RANK") get extracted as tickers and dispatch agents that fail. Extending `_SKIP_WORDS` or requiring a `$` prefix for unlabelled tickers would reduce noise.
