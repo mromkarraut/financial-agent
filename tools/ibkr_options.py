@@ -8,20 +8,21 @@ caller to fall through to yfinance.
 Data flow:
   1. Connect to IB Gateway (client ID from config.IBKR_CLIENT_ID_OPTIONS_RESEARCH)
   2. Qualify underlying stock → get conId + company name
-  3. reqMktData(underlying) → current price
+  3. reqMktData(underlying) → poll until price arrives (up to 5 min)
   4. reqSecDefOptParams → available expirations + strikes
-  5. Build Option contracts for ±15% strikes × first 4 expirations
-  6. reqMktData for all contracts (genericTickList="106,107" for IV)
-  7. Wait 4s, collect bid/ask/IV from modelGreeks
+  5. Build Option contracts for ±15% strikes × up to 12 expirations (180d window)
+  6. reqMktData for all contracts (genericTickList="106" for IV)
+  7. Poll every 0.5s until fills plateau (no new bid/ask for 4s) or 5-min timeout
   8. reqHistoricalData(TRADES, 1Y, 1day) → compute rolling 30d HV for IVR
 
-Output dict matches tools.market_data.get_options_chain() exactly.
+All IBKR I/O is event-driven: no blind sleeps, proceeds as soon as data arrives.
+Overall timeout: 300s (5 minutes) for each blocking step.
 """
 
 import asyncio
 import logging
 import math
-from datetime import date
+from datetime import date, timedelta
 
 from ib_insync import Option, Stock
 
@@ -30,8 +31,60 @@ from tools.ibkr_tws import connect_ib
 
 logger = logging.getLogger(__name__)
 
-CLIENT_ID = config.IBKR_CLIENT_ID_OPTIONS_RESEARCH
+CLIENT_ID  = config.IBKR_CLIENT_ID_OPTIONS_RESEARCH
+IBKR_TIMEOUT = 300.0  # 5 minutes — applied to every blocking step
 
+
+# ── Async polling helpers ──────────────────────────────────────────────────────
+
+async def _wait_for_price(und_ticker, timeout: float = IBKR_TIMEOUT) -> float:
+    """Poll until the underlying ticker has any valid price, or timeout."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        for val in (und_ticker.last, und_ticker.close, und_ticker.bid, und_ticker.ask):
+            try:
+                if val and float(val) > 0:
+                    return float(val)
+            except (TypeError, ValueError):
+                pass
+        await asyncio.sleep(0.5)
+    return 0.0
+
+
+async def _wait_for_fills(
+    ticker_map: dict,
+    timeout: float = IBKR_TIMEOUT,
+    plateau_secs: float = 4.0,
+) -> int:
+    """
+    Poll option tickers until the number of contracts with a bid or ask
+    stops increasing for plateau_secs consecutive seconds, or timeout.
+
+    Returns the final fill count.
+    """
+    loop      = asyncio.get_event_loop()
+    deadline  = loop.time() + timeout
+    last_count   = -1
+    plateau_start = loop.time()
+
+    while loop.time() < deadline:
+        filled = sum(
+            1 for _, t in ticker_map.values()
+            if (t.bid and t.bid > 0) or (t.ask and t.ask > 0)
+        )
+        now = loop.time()
+        if filled != last_count:
+            last_count    = filled
+            plateau_start = now
+        elif now - plateau_start >= plateau_secs:
+            break  # data has stopped arriving
+        await asyncio.sleep(0.5)
+
+    logger.info("_wait_for_fills: %d/%d contracts filled", max(last_count, 0), len(ticker_map))
+    return max(last_count, 0)
+
+
+# ── Main fetch ─────────────────────────────────────────────────────────────────
 
 async def get_options_chain_ibkr(ticker: str) -> dict:
     """
@@ -47,14 +100,16 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
     ticker = ticker.strip().upper()
 
     try:
-        ib = await connect_ib(CLIENT_ID, timeout=20.0)
+        ib = await connect_ib(CLIENT_ID, timeout=IBKR_TIMEOUT)
     except ConnectionError as exc:
         return {"error": str(exc)}
 
     try:
         # ── 1. Qualify underlying ─────────────────────────────────────
         und = Stock(ticker, "SMART", "USD")
-        qualified = await ib.qualifyContractsAsync(und)
+        qualified = await asyncio.wait_for(
+            ib.qualifyContractsAsync(und), timeout=IBKR_TIMEOUT
+        )
         if not qualified:
             return {"error": f"Cannot qualify {ticker}"}
         und_contract = qualified[0]
@@ -63,29 +118,22 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
         company_name = ticker
         try:
             details = await asyncio.wait_for(
-                ib.reqContractDetailsAsync(und_contract), timeout=5.0
+                ib.reqContractDetailsAsync(und_contract), timeout=IBKR_TIMEOUT
             )
             if details:
                 company_name = details[0].longName or ticker
         except Exception:
             pass
 
-        # ── 3. Current price ─────────────────────────────────────────
-        # Try real-time first, then frozen (delayed) if market is closed
+        # ── 3. Current price (poll, no blind sleep) ───────────────────
         price = 0.0
-        for mkt_type in (1, 2, 3):   # 1=live, 2=frozen, 3=delayed
+        for mkt_type in (1, 2, 3):   # live → frozen → delayed
             ib.reqMarketDataType(mkt_type)
             und_ticker = ib.reqMktData(und_contract, "221", False, False)
-            await asyncio.sleep(2)
-            for val in (und_ticker.last, und_ticker.close, und_ticker.bid, und_ticker.ask):
-                try:
-                    if val and float(val) > 0:
-                        price = float(val)
-                        break
-                except (TypeError, ValueError):
-                    pass
+            price = await _wait_for_price(und_ticker, timeout=30.0)
             ib.cancelMktData(und_contract)
             if price:
+                logger.info("get_options_chain_ibkr(%s): price=%.2f (mkt_type=%d)", ticker, price, mkt_type)
                 break
 
         # Last resort: most recent close from historical data
@@ -97,7 +145,7 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
                         barSizeSetting="1 day", whatToShow="TRADES",
                         useRTH=True, formatDate=1, keepUpToDate=False,
                     ),
-                    timeout=12.0,
+                    timeout=IBKR_TIMEOUT,
                 )
                 closes = [float(b.close) for b in bars if b.close and b.close > 0]
                 if closes:
@@ -113,10 +161,10 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
             ib.reqSecDefOptParamsAsync(
                 und_contract.symbol, "", und_contract.secType, und_contract.conId
             ),
-            timeout=10.0,
+            timeout=IBKR_TIMEOUT,
         )
 
-        # Prefer SMART exchange; fall back to first available
+        # Prefer SMART exchange; fall back to IBKR or first available
         chain_p = (
             next((c for c in chains_params if c.exchange == "SMART"), None)
             or next((c for c in chains_params if c.exchange == "IBKR"), None)
@@ -125,28 +173,28 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
         if not chain_p:
             return {"error": f"No option chain params for {ticker}"}
 
-        # ── 5. Select expirations and strikes ─────────────────────────
-        today = date.today().strftime("%Y%m%d")
-        future_exps = sorted(e for e in chain_p.expirations if e >= today)[:4]
+        # ── 5. Select expirations (180-day window, max 12) and strikes ─
+        today  = date.today().strftime("%Y%m%d")
+        cutoff = (date.today() + timedelta(days=700)).strftime("%Y%m%d")
+        future_exps = sorted(e for e in chain_p.expirations if today <= e <= cutoff)[:24]
         if not future_exps:
             return {"error": f"No upcoming expirations found for {ticker}"}
 
-        # ±15% around current price, capped at 8 strikes either side of ATM
+        # ±15% around current price, ≤17 strikes centred on ATM
         lo, hi = price * 0.85, price * 1.15
         all_strikes = sorted(chain_p.strikes)
         filtered = [s for s in all_strikes if lo <= s <= hi]
         if not filtered:
-            # Widen to ±25% for illiquid/low-priced tickers
             lo, hi = price * 0.75, price * 1.25
             filtered = [s for s in all_strikes if lo <= s <= hi]
         if not filtered:
             return {"error": f"No strikes within 25% of {ticker} price ${price:.2f}"}
 
-        atm = min(filtered, key=lambda s: abs(s - price))
+        atm     = min(filtered, key=lambda s: abs(s - price))
         atm_idx = filtered.index(atm)
-        filtered = filtered[max(0, atm_idx - 8): atm_idx + 9]  # ≤17 strikes
+        filtered = filtered[max(0, atm_idx - 8): atm_idx + 9]
 
-        # ── 6. Build Option contracts (no pre-qualification needed) ───
+        # ── 6. Build Option contracts ─────────────────────────────────
         opt_contracts: list[Option] = []
         for exp in future_exps:
             for right in ("C", "P"):
@@ -155,16 +203,18 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
                         Option(ticker, exp, strike, right, "SMART", currency="USD")
                     )
 
-        # ── 7. Request market data for all contracts ───────────────────
-        # Use same market data type as was successful for underlying price.
-        # genericTickList "106,107" = ask IV / bid IV; modelGreeks auto-populate.
-        ticker_map: dict[str, tuple] = {}  # key = (exp, right, strike)
+        # ── 7. Request market data + poll until fills plateau ──────────
+        ticker_map: dict[tuple, tuple] = {}
         for c in opt_contracts:
             key = (c.lastTradeDateOrContractMonth, c.right, c.strike)
-            t = ib.reqMktData(c, "106,107", False, False)
+            t   = ib.reqMktData(c, "106", False, False)
             ticker_map[key] = (c, t)
 
-        await asyncio.sleep(6)  # allow data to stream in (paper accounts are slow)
+        logger.info(
+            "get_options_chain_ibkr(%s): requested %d contracts (%d exps × %d strikes × 2), polling...",
+            ticker, len(opt_contracts), len(future_exps), len(filtered),
+        )
+        await _wait_for_fills(ticker_map, timeout=IBKR_TIMEOUT, plateau_secs=4.0)
 
         # Cancel all subscriptions
         for c, _ in ticker_map.values():
@@ -184,25 +234,25 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
                 if greeks and getattr(greeks, "impliedVol", None):
                     try:
                         v = float(greeks.impliedVol)
-                        if 0.001 < v < 20:   # sanity range (0.1% – 2000% IV)
+                        if 0.001 < v < 20:
                             iv = round(v, 4)
                             break
                     except (TypeError, ValueError):
                         pass
 
-            bid  = float(t.bid)  if (t.bid  and t.bid  > 0) else 0.0
-            ask  = float(t.ask)  if (t.ask  and t.ask  > 0) else 0.0
-            last = float(t.last) if (t.last and t.last > 0) else (
+            bid  = float(t.bid)   if (t.bid   and t.bid   > 0) else 0.0
+            ask  = float(t.ask)   if (t.ask   and t.ask   > 0) else 0.0
+            last = float(t.last)  if (t.last  and t.last  > 0) else (
                    float(t.close) if (t.close and t.close > 0) else 0.0)
-            vol  = int(t.volume) if (t.volume and t.volume > 0) else 0
+            vol  = int(t.volume)  if (t.volume and t.volume > 0) else 0
 
             row = {
-                "strike":          float(strike),
-                "bid":             round(bid,  2),
-                "ask":             round(ask,  2),
-                "lastPrice":       round(last, 2),
-                "volume":          vol,
-                "openInterest":    0,     # not available in streaming data
+                "strike":            float(strike),
+                "bid":               round(bid,  2),
+                "ask":               round(ask,  2),
+                "lastPrice":         round(last, 2),
+                "volume":            vol,
+                "openInterest":      None,  # not available in streaming data
                 "impliedVolatility": iv,
             }
 
@@ -213,7 +263,6 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
             else:
                 exp_rows[exp_fmt]["puts"].append(row)
 
-        # Sort strikes within each expiration
         available_exps = [f"{e[:4]}-{e[4:6]}-{e[6:]}" for e in future_exps]
         chains_out = []
         for exp_fmt in available_exps:
@@ -244,14 +293,14 @@ async def get_options_chain_ibkr(ticker: str) -> dict:
                     formatDate=1,
                     keepUpToDate=False,
                 ),
-                timeout=15.0,
+                timeout=IBKR_TIMEOUT,
             )
             closes = [float(b.close) for b in bars if b.close and b.close > 0]
             if len(closes) >= 31:
                 log_rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
                 window = 30
                 for i in range(window - 1, len(log_rets)):
-                    w = log_rets[i - window + 1: i + 1]
+                    w    = log_rets[i - window + 1: i + 1]
                     mean = sum(w) / window
                     var  = sum((x - mean) ** 2 for x in w) / (window - 1)
                     hv_series.append(round(math.sqrt(var) * math.sqrt(252), 4))

@@ -121,7 +121,7 @@ from mcp_servers.data_pull import get_stock_data, get_fundamentals, get_options_
 
 Priority chain:
 - **Stock data**: yfinance (+ Polygon overlay if `POLYGON_API_KEY` set)
-- **Fundamentals**: IB Gateway (Reuters Refinitiv) → Yahoo Finance
+- **Fundamentals**: IB Gateway (Reuters Refinitiv) → SEC EDGAR via edgartools → Yahoo Finance
 - **Options chain**: IB Gateway (real-time) → Yahoo Finance (delayed)
 
 Features: in-memory TTL cache (stock 60s, fundamentals/options 5min), every fetch logged to `db/agents/data_pull.db` with source + latency + cache-hit flag.
@@ -268,6 +268,7 @@ New tables via `CREATE TABLE IF NOT EXISTS` in `db/database.py → init_db()`. S
 | `MCP_LLM_PROVIDER` | `lmstudio` | `lmstudio` \| `anthropic` \| `openai` |
 | `MCP_LLM_MODEL` | (falls back to `LLM_MODEL`) | |
 | `POLYGON_API_KEY` | — | Optional; real-time quotes over yfinance |
+| `EDGAR_IDENTITY` | `Financial Agent research@example.com` | SEC EDGAR User-Agent (`Name email`); required by SEC fair-use policy |
 | `IBKR_PAPER_TRADING` | `true` | Set `false` for live (real money) |
 | `IBKR_TWS_HOST` | `127.0.0.1` | |
 | `IBKR_TWS_PORT` | `4002` (paper) / `4001` (live) | IB Gateway socket port |

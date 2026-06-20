@@ -102,7 +102,7 @@ async def get_open_positions(account_id: str = "") -> str:
         if not account_id:
             account_id = await get_account_id(ib)
 
-        positions = await asyncio.wait_for(ib.reqPositionsAsync(), timeout=10)
+        positions = await asyncio.wait_for(ib.reqPositionsAsync(), timeout=300)
         if account_id:
             positions = [p for p in positions if p.account == account_id]
         ms = int((time.monotonic() - t0) * 1000)
@@ -298,7 +298,7 @@ async def get_positions_dict() -> dict:
     try:
         ib         = await connect_ib(CLIENT_ID)
         account_id = await get_account_id(ib)
-        positions  = await asyncio.wait_for(ib.reqPositionsAsync(), timeout=10)
+        positions  = await asyncio.wait_for(ib.reqPositionsAsync(), timeout=300)
         if account_id:
             positions = [p for p in positions if p.account == account_id]
 

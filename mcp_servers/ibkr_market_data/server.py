@@ -176,7 +176,21 @@ async def get_market_snapshot(symbols_csv: str) -> str:
         qualified = await ib.qualifyContractsAsync(*contracts)
 
         tickers = [ib.reqMktData(c, "", False, False) for c in qualified]
-        await asyncio.sleep(2)  # allow data to arrive
+
+        # Poll until all symbols have a price or plateau (no new data for 3s)
+        deadline     = time.monotonic() + 300.0
+        last_filled  = -1
+        plateau_time = time.monotonic()
+        while time.monotonic() < deadline:
+            filled = sum(1 for t in tickers if (t.last and t.last > 0) or (t.bid and t.bid > 0))
+            if filled != last_filled:
+                last_filled  = filled
+                plateau_time = time.monotonic()
+            elif time.monotonic() - plateau_time >= 3.0:
+                break
+            if filled == len(tickers):
+                break
+            await asyncio.sleep(0.5)
 
         ms = int((time.monotonic() - t0) * 1000)
         await _log_call("get_market_snapshot", ms, symbols_csv)

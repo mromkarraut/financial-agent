@@ -2,9 +2,10 @@
 Tastytrade-style options research agent with per-ticker memory.
 
 For each request it:
-  1. Fetches live chain data for up to 4 expirations
-  2. Computes BS delta, theta, POP, P50, ROC for up to 5 spread strategies
-  3. Ranks them and highlights the best fit for the stated outlook
+  1. Fetches live chain data via mcp_servers.data_pull (IBKR → yfinance, up to 24
+     expirations across a 700-day window)
+  2. Computes BS delta, theta, POP, P50, ROC for up to 5 debit spread strategies
+  3. Ranks them by DTE proximity to dte_target, then by POP
   4. Outputs a Tastytrade-style HTML card with chain table, comparison grid, P&L chart
   5. Remembers previous research per (chat, ticker) so it can show price/IV changes
 """
@@ -21,7 +22,7 @@ import config
 from agents.base_agent import AgentResult, BaseAgent
 from mcp_servers.llm import get_llm_client
 from tools import html_components as hc
-from tools.market_data import get_options_chain
+from mcp_servers.data_pull import get_options_chain
 from tools.options_math import (
     bs_delta, bs_theta_daily,
     expected_move, ivr_rank,
@@ -100,19 +101,16 @@ def _mid(row: dict) -> float:
     return round(last, 2)
 
 
-MIN_OI  = 100    # minimum open interest per leg
 MAX_BA_PCT = 0.50  # max bid-ask spread as fraction of mid (50%)
 
 
 def _is_liquid(row: dict) -> bool:
     """True if this leg has a usable price quote.
 
-    Primary path: real-time two-sided market (bid > 0, ask > 0) with spread ≤50%
-    and sufficient open interest.
-
-    Fallback: when bid/ask are zero (yfinance off-hours or data gaps), accept any
-    row with a non-zero lastPrice and skip the OI check — yfinance frequently
-    reports OI=0 for liquid strikes when markets are closed.
+    Two-sided market: bid > 0 and ask > 0 with spread ≤50% of mid.
+    Fallback: no live bid/ask — accept any row with a non-zero lastPrice
+    (yfinance off-hours / IBKR data gaps).
+    OI not checked — IBKR streaming never provides it.
     """
     bid  = row.get("bid")  or 0.0
     ask  = row.get("ask")  or 0.0
@@ -124,12 +122,8 @@ def _is_liquid(row: dict) -> bool:
             return False
         if (ask - bid) / mid > MAX_BA_PCT:
             return False
-        oi = row.get("openInterest")
-        if oi is not None and float(oi) < MIN_OI:
-            return False
         return True
 
-    # Fallback: no live bid/ask — use lastPrice, skip OI check
     return last > 0
 
 
@@ -347,7 +341,7 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float,
     """
     candidates: list[dict] = []
 
-    for chain in chains[:3]:
+    for chain in chains:
         exp = chain["expiration"]
         dte = _dte(exp)
         if dte <= 4:
@@ -425,9 +419,9 @@ def _generate_strategies(outlook: str, chains: list[dict], price: float,
 
 def _fmt_exp_selector(chains: list[dict], price: float) -> str:
     rows = []
-    dtes = [_dte(c["expiration"]) for c in chains[:5]]
+    dtes = [_dte(c["expiration"]) for c in chains[:8]]
     max_dte = max(dtes) if dtes else 1
-    for chain, dte in zip(chains[:5], dtes):
+    for chain, dte in zip(chains[:8], dtes):
         exp = chain["expiration"]
         # ATM IV and expected move for this expiration
         calls = chain.get("calls", [])
@@ -1600,11 +1594,28 @@ class OptionsResearchAgent(BaseAgent):
             strategies = _generate_strategies(outlook, chains, price, dte_target=dte_target)
             best = strategies[0] if strategies else None
 
+            # Fallback: if target-DTE chains have sparse data (e.g. IBKR paper LEAPS only
+            # stream ATM quotes), retry with ALL viable chains so we still surface strategies.
+            data_sparse_fallback = False
+            if not strategies and dte_target > 0 and viable:
+                strategies = _generate_strategies(outlook, viable, price, dte_target=dte_target)
+                best = strategies[0] if strategies else None
+                if strategies:
+                    data_sparse_fallback = True
+                    chains = viable   # show all available chains for context
+
             llm_analysis = ""
 
-            # ── DTE alignment guardrail ───────────────────────────────────────
+            # ── DTE alignment guardrail / data-sparse note ────────────────────
             dte_note: str | None = None
-            if dte_target > 0 and best:
+            if data_sparse_fallback:
+                actual = best.get("dte", 0) if best else 0
+                dte_note = (
+                    f'⚠️ <b>Long-dated data sparse</b> — IBKR paper account only streams ATM quotes '
+                    f'for {dte_target}d+ options on {ticker}. '
+                    f'Nearest chain with spread data: <b>{actual}d ({_fmt_exp(best["exp"] if best else "")})</b>.'
+                )
+            elif dte_target > 0 and best:
                 tol       = max(10, dte_target // 3)
                 actual    = best.get("dte", 0)
                 diff      = abs(actual - dte_target)

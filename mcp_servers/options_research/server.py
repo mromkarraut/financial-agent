@@ -7,7 +7,7 @@ Claude Sonnet provides optional market context when requested.
 
 Tools:
   research_options(ticker, outlook)     → full spread research + ranked strategies
-  get_options_chain(ticker)             → raw chain JSON for first 4 expirations
+  get_options_chain(ticker)             → raw chain JSON (up to 24 expirations, 700d)
   calculate_iv_rank(ticker)             → IVR + ATM IV vs 52-week HV range
   recall_research(ticker, limit)        → history from agent memory
 
@@ -150,6 +150,9 @@ async def _log_call(tool: str, ticker: str, duration_ms: int) -> None:
 
 # ── Strategy engine (vertical spreads only) ───────────────────────────────────
 
+MIN_SPREAD_WIDTH = 4.0  # minimum spread width in dollars — rejects near-worthless spreads
+
+
 def _make_spread(kind: str, buy_s: float, sell_s: float,
                  buy_r: dict, sell_r: dict,
                  price: float, T: float, exp: str, dte: int) -> dict | None:
@@ -202,10 +205,10 @@ def _make_spread(kind: str, buy_s: float, sell_s: float,
 
 def _generate_spreads(outlook: str, chains: list[dict], price: float) -> list[dict]:
     candidates: list[dict] = []
-    for chain in chains[:3]:
+    for chain in chains:
         exp = chain["expiration"]
         dte = _dte(exp)
-        if dte <= 0:
+        if dte <= 4:
             continue
         T = dte / 365.0
         calls_l = sorted([r for r in chain.get("calls", []) if r.get("strike")], key=lambda r: r["strike"])
@@ -216,8 +219,9 @@ def _generate_spreads(outlook: str, chains: list[dict], price: float) -> list[di
         atm    = _atm(all_s, price)
         cm     = {r["strike"]: r for r in calls_l}
         pm     = {r["strike"]: r for r in puts_l}
-        above  = [s for s in all_s if s > atm]
-        below  = [s for s in all_s if s < atm]
+        # Only strikes that are at least MIN_SPREAD_WIDTH away from ATM
+        above  = [s for s in all_s if s > atm and (s - atm) >= MIN_SPREAD_WIDTH]
+        below  = [s for s in all_s if s < atm and (atm - s) >= MIN_SPREAD_WIDTH]
 
         if outlook in ("bullish", "neutral"):
             for otm in above[:2]:
@@ -309,7 +313,7 @@ async def research_options(ticker: str, outlook: str = "neutral") -> str:
     if atm_iv and chains:
         # Build expiration expected-move summary
         exp_lines = []
-        for chain in chains[:4]:
+        for chain in chains[:8]:
             exp = chain["expiration"]
             dte = _dte(exp)
             calls_l = [r for r in chain.get("calls", []) if r.get("strike")]
@@ -431,7 +435,7 @@ Top 2-3 specific risks: theta decay rate, IV crush potential, directional failur
 @mcp.tool()
 async def get_options_chain_data(ticker: str) -> str:
     """
-    Raw options chain JSON for the first 4 expirations (calls + puts).
+    Raw options chain JSON for up to 24 expirations within 700 days (calls + puts).
     Strikes filtered to ±15% around current price. No formatting.
     """
     await _ensure_db()
