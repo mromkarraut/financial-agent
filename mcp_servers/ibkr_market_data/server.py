@@ -1,7 +1,7 @@
 """
 IBKR Market Data MCP Server  (ib_insync / TWS socket)
 
-Contract lookup, live quotes, option chain discovery via IB Gateway.
+Contract lookup, live quotes, option chain discovery via TWS.
 Conid results cached in db/state.db.
 
 Tools:
@@ -36,7 +36,29 @@ import config  # noqa: E402
 from tools.ibkr_tws import (  # noqa: E402
     connect_ib, make_option_contract, paper_label,
 )
-from agents.ibkr_agent import _cache_get, _cache_set  # noqa: E402  (reuse SQLite cache)
+_STATE_DB = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "db", "state.db",
+)
+
+
+async def _cache_get(symbol: str, expiry: str, right: str, strike: float):
+    async with aiosqlite.connect(_STATE_DB) as db:
+        async with db.execute(
+            "SELECT conid FROM ibkr_conid_cache WHERE symbol=? AND expiry=? AND right=? AND strike=?",
+            (symbol, expiry, right, strike),
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def _cache_set(symbol: str, expiry: str, right: str, strike: float, conid: int) -> None:
+    async with aiosqlite.connect(_STATE_DB) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO ibkr_conid_cache (symbol, expiry, right, strike, conid) VALUES (?,?,?,?,?)",
+            (symbol, expiry, right, strike, conid),
+        )
+        await db.commit()
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +114,7 @@ mcp = FastMCP(
 @mcp.tool()
 async def get_stock_conid(symbol: str) -> str:
     """
-    Qualify a stock/ETF symbol and return its conid from IB Gateway.
+    Qualify a stock/ETF symbol and return its conid from TWS.
     The conid is required for order placement and market data subscriptions.
     """
     await _ensure_db()
@@ -164,7 +186,7 @@ async def get_market_snapshot(symbols_csv: str) -> str:
     symbols_csv: comma-separated list e.g. "AAPL,MSFT,SPY"
     Returns bid, ask, last, volume, and change for each.
 
-    Note: IB Gateway may take a moment to subscribe — call twice if values are missing.
+    Note: TWS may take a moment to subscribe — call twice if values are missing.
     """
     await _ensure_db()
     t0      = time.monotonic()
